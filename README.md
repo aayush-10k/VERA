@@ -25,7 +25,8 @@ A behaviour-fingerprint index handles code *versions*: two revisions are "the sa
 | MTEB harness | `VERASearchProtocol` runs inside `mteb.evaluate`; TF-IDF reference row NDCG@10 = **0.0262** (BM25 in the field ≈ 0.0095) | `artifacts/ref_tfidf_results.json` |
 | Stage-2 store (P1) | incremental rebuild **13.2×** faster than full re-embed on a 200-file × 20-commit history | `docs/stage2-benchmark.md` |
 | Stage-2 ranking (Bonus) | working-version-first **89.5 %** (dense-only 51.5 %); on the both-pass subset **66.1 %** vs 55.9 % | `docs/stage2-benchmark.md` |
-| R0 / R2 / R3 / R4 | dense baseline and verification rungs on the full test split | *running* — `docs/ablations.md` |
+| R0 dense baseline | **NDCG@10 0.5683** · MRR@10 0.5207 · R@10 0.719 · R@100 0.919 on the full 3,765-query test split via `mteb.evaluate` (published zero-shot 56.4; a competitor's 1024-token reproduction 57.5) | `artifacts/m3_r0_results.json` |
+| R2 / R3 / R4 | verification rungs on the full test split | *running* — `docs/ablations.md` |
 
 ---
 
