@@ -1,136 +1,122 @@
-# VERA: Verification-Engineered Retrieval Architecture
+# VERA — Verify-first Retrieval Architecture
 
-[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
-[![Test Suite](https://img.shields.io/badge/pytest-33%20passed-brightgreen.svg)]()
-[![Benchmark](https://img.shields.io/badge/MTEB-AppsRetrieval-orange.svg)](https://huggingface.co/datasets/mteb/apps_retrieval)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+*Samsung PRISM GenAI Hackathon · Theme 1: Agentic Code Intelligence (CoIR `AppsRetrieval`)*
 
-**VERA** is a verifiable, dual-harness retrieval engine purpose-built for the **AppsRetrieval** benchmark within the CoIR (Code Information Retrieval) track. VERA solves the fundamental failure modes of standard dense encoders on competitive programming problems by combining long-context dense retrieval with an isolated, sub-millisecond execution verification engine and rarity-weighted confidence re-ranking.
+**The encoder proposes, the runtime disposes.** Every APPS problem statement carries a worked
+example. VERA turns that example into an executable test, runs the dense retriever's candidate
+programs on it in a process-isolated sandbox, and re-ranks with a rarity-weighted, bounded boost.
+A behaviour-fingerprint index handles code *versions*: two revisions are "the same" when they
+**do** the same thing on a probe battery, not when they read the same.
 
----
-
-## 🌟 Key Architecture & Capabilities
-
-1. **8192-Context Dense Chassis (`vera/chassis/`)**:
-   - Embeds natural language problem statements and Python solutions with `Alibaba-NLP/gte-modernbert-base` without truncation.
-   - Preserves tail sections (worked examples and constraints) that standard 512/1024-token encoders discard.
-   - Built-in resilient high-speed TF-IDF fallback vectorization for air-gapped or CPU-constrained environments.
-
-2. **Isolated Dual-Harness Sandbox (`vera/verify/`)**:
-   - **Mode A (Script Stdin/Stdout)**: Pipes standard input and captures output streams via memory buffers.
-   - **Mode B (Callable Entrypoint)**: AST analysis dynamically instantiates competitive programming classes (`class Solution:`) and invokes entry functions (`solve(*args)`).
-   - **Fast-I/O Immunity**: Hardened against competitive programming patterns (`open(0).read()`, `os.read(0, ...)`, `sys.stdin.buffer`) via virtual streams and OS file descriptor redirection.
-   - **Deterministic Step Guardrails**: Sub-millisecond step-tracing (`sys.settrace`) prevents infinite loops without leaking threads or blocking the GIL.
-
-3. **Normalized Output Comparator (`vera/verify/comparator.py`)**:
-   - Token-level whitespace and formatting normalization.
-   - Case-insensitive boolean and verdict normalization (`"yes"`/`"no"`, `"true"`/`"false"`).
-   - Relative floating-point tolerance check: $|a - b| \le 10^{-6} \cdot \max(1.0, |b|)$.
-   - Multi-line set-order permutation fallback for problems accepting unordered answers.
-
-4. **Calibrated Rarity Boost (Rung R2, `vera/verify/boost.py`)**:
-   - Downweights candidates producing common or trivial outputs (e.g. constant `0` or `-1`) using inverse frequency weighting:
-     $$\text{conf}(d, q) = \left(\frac{e_{pass}}{E}\right) \cdot \frac{1}{1 + \log_2(m)}$$
-   - Seamlessly blends verification confidence with min-max normalized dense candidate scores.
+> **Status (2026-09-27).** The verification engine, the MTEB harness and the Stage-2 modules are
+> built and measured; the dense chassis runs are in progress on CPU. Every number below comes
+> from a script in `scripts/` on this repository — see `docs/ablations.md` for the live table and
+> `TASKS.md` for the honest checklist (including which earlier claims were withdrawn and why).
 
 ---
 
-## 📊 Benchmark & Submission Results
+## What is measured so far
 
-Results on **AppsRetrieval** (`appsretrieval_results.json` schema-validated under MTEB v2.0.1 specification):
-
-| Pipeline Stage | Model / Strategy | NDCG@100 | Recall@100 | Verification Throughput | Status |
-| :--- | :--- | :---: | :---: | :---: | :--- |
-| **R0: Zero-Shot Baseline** | `gte-modernbert-base` | 0.01072 | 0.0450 | — | ✅ Verified |
-| **M4: Gold-Run Gate** | Empirical Ceiling Test | — | — | 33.1 ms/pair | ⚠️ Cautious Ceiling ($<40\%$) |
-| **R2: Top-$K$ Verification** | VERA Dual-Harness ($K=150$) | **0.00371** | **0.0200** | **1.07 ms/candidate** | 🚀 **Guaranteed Fallback Ship** |
-
-Official MTEB submission file: [appsretrieval_results.json](file:///appsretrieval_results.json)
+| Component | Measurement | Where |
+|---|---|---|
+| Worked-example parser | **98.67 %** of the 3,765 test statements yield executable `(stdin, expected)` pairs (Codeforces 78.3 %, AtCoder/CodeChef 19.2 %, LeetCode 1.0 %) | `docs/dataset-audit.md` |
+| Gold-run gate (M4) | gold passes its own example in **87.2 %** of parseable train pairs; **86.7 %** projected on the test format mix → corpus-wide track unlocked | `docs/goldrun.md` |
+| Sandbox | fork-per-run isolated worker, SIGKILL timeouts, rlimits; ≈ 4–6 ms dispatch; 45 unit tests green | `vera/verify/executor.py`, `tests/` |
+| MTEB harness | `VERASearchProtocol` runs inside `mteb.evaluate`; TF-IDF reference row NDCG@10 = **0.0262** (BM25 in the field ≈ 0.0095) | `artifacts/ref_tfidf_results.json` |
+| Stage-2 store (P1) | incremental rebuild **13.2×** faster than full re-embed on a 200-file × 20-commit history | `docs/stage2-benchmark.md` |
+| Stage-2 ranking (Bonus) | working-version-first **89.5 %** (dense-only 51.5 %); on the both-pass subset **66.1 %** vs 55.9 % | `docs/stage2-benchmark.md` |
+| R0 / R2 / R3 / R4 | dense baseline and verification rungs on the full test split | *running* — `docs/ablations.md` |
 
 ---
 
-## 🚀 Quickstart & Reproduction Guide
+## Architecture
 
-### 1. Environment Setup
+```
+query statement ──► WorkedExampleParser ──► [(stdin, expected)]           (vera/verify/parser.py)
+      │                                              │
+      ▼                                              ▼
+L1  DenseChassis: gte-modernbert-base, 8192 ctx,   L2  VerificationSandbox: fork-per-run, rlimits,
+    stripped corpus, brute-force cosine                 dual harness (script / call), normalized
+    (vera/chassis/baseline.py)                          comparator, adaptive timeouts
+      │ top-150                                         (vera/verify/executor.py, comparator.py)
+      └────────────► TopKVerifier: conf = (e_pass/E) · 1/(1+log2 m);  S = norm(dense) + α·conf
+                     (vera/verify/boost.py)   α fit on the 500-pair dev split only
+                          │
+        R3: GatedVerifier extends to dense rank 1000 for uncertain queries, filtered by the
+            static signature gate (vera/gate/router.py)
+        R4: QB-Norm hubness demotion with the public train statements as bank (vera/chassis/qbnorm.py)
+                          │
+                          ▼
+              MTEB v2 SearchProtocol  (vera/mtebio/search_protocol.py)  →  mteb.evaluate → TaskResult JSON
 
-Clone and install dependencies with Python 3.12:
+L3  Stage-2 / P1 (vera/stage2/): normalized-AST version store · git + folder ingestion ·
+    probe-battery behaviour fingerprints ("behaviorally unchanged") · working-first version ranker
+```
+
+Hard rules (`BUILD.md` §3): no scoring path reads ids, `partition` or `meta_information`;
+all tuning on the dev split; verification is a bounded additive boost, never a filter; CPU-only
+inference, pinned dependencies.
+
+---
+
+## Reproduce
 
 ```bash
-git clone https://github.com/<your-username>/VERA.git
-cd VERA
+git clone <this repo> && cd VERA
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.lock --extra-index-url https://download.pytorch.org/whl/cpu
 
-# Install pinned dependencies
-pip install -r requirements.lock
+pytest tests/ -q                                  # 45 tests, ~15 s
+
+python scripts/reproduce_submission.py            # highest rung with a recorded dev fit -> appsretrieval_results.json
+python scripts/reproduce_submission.py --rung R0  # dense baseline only
 ```
 
-### 2. Run the Verification Test Suite
+Cold-start cost on a 4-core CPU: model download ≈ 300 MB, corpus embedding ≈ 45 min, test-query
+embedding ≈ 25 min (both cached under `vera/chassis/cache/`), then R2 verification ≈ 30 min.
+Warm re-runs take a few minutes. `transformers >= 4.48` is required (ModernBERT).
 
-Run the full pytest suite (33 passing unit tests across all 6 core submodules):
+Milestone scripts, each writing its artifact:
 
-```bash
-pytest tests/ -v
-```
-
-### 3. Run the R2 Top-K Verification Benchmark
-
-Execute the end-to-end verification re-ranking benchmark across 200 sampled test queries with top-150 candidate verification:
-
-```bash
-python scripts/m7_topk_verify.py --sample 200 --top_k 150 --alpha 0.20 --no_grid
-```
-
-This updates both `artifacts/m7_r2_results.json` and `appsretrieval_results.json` with MTEB v2.0.1 schema-validated evaluation results.
-
-### 4. Run Gold-Run Empirical Measurement
-
-To measure the empirical pass rate of raw gold solutions on extracted worked examples:
-
-```bash
-python scripts/m4_goldrun.py --sample 300
-```
+| Script | Produces |
+|---|---|
+| `scripts/m1_audit.py` | `docs/dataset-audit.md` |
+| `scripts/m2_harness_test.py` | `artifacts/m2_proof_of_life.json`, `artifacts/ref_tfidf_results.json` (mteb, TF-IDF) |
+| `scripts/m3_baseline.py` | `artifacts/m3_r0_results.json`, `docs/dev_r0.json` |
+| `scripts/m4_goldrun.py` | `docs/goldrun.md` |
+| `scripts/m7_topk_verify.py` | `docs/dev_r2.json` (α sweep), `artifacts/m7_r2_results.json` |
+| `scripts/m8_corpus_gate.py` | `docs/dev_r3.json`, `artifacts/m8_r3_results.json` (only if R3 wins on dev) |
+| `scripts/m9_qbnorm.py` | `docs/dev_r4.json`, `artifacts/m9_r4_results.json` (only if R4 wins on dev) |
+| `python -m vera.eval.ablation` | `docs/ablations.md` |
+| `scripts/s3_version_benchmark.py` | `docs/stage2-benchmark.md` |
+| `scripts/run_demo.py` | Gradio page (`--encoder tfidf` for an instant start) |
+| `python -m vera.chassis.train --device cuda --lora` | R1 fine-tuned chassis (GPU session; not yet run) |
 
 ---
 
-## 📂 Repository Structure
+## Repository layout
 
 ```
-├── appsretrieval_results.json   # Official MTEB v2.0.1 submission artifact
-├── artifacts/                   # Serialized milestone test outputs (m3, m5, m7)
-│   ├── m3_r0_results.json
-│   ├── m5_r1_results.json
-│   └── m7_r2_results.json
-├── docs/                        # Formal design docs, audits, and decision gates
-│   ├── dataset-audit.md
-│   └── goldrun.md
-├── scripts/                     # Executable milestone runners
-│   ├── m1_audit.py
-│   ├── m2_harness_test.py
-│   ├── m3_baseline.py
-│   ├── m4_goldrun.py
-│   ├── m5_eval_r1.py
-│   └── m7_topk_verify.py
-├── tests/                       # Complete pytest unit test suite (33 tests)
-│   ├── test_boost.py
-│   ├── test_chassis.py
-│   ├── test_data_loader.py
-│   ├── test_executor.py
-│   ├── test_mtebio.py
-│   └── test_parser_and_gate.py
-├── vera/                        # Core VERA architecture package
-│   ├── chassis/                 # Long-context dense embedding & preprocessing
-│   ├── data/                    # Dataset streaming, loader & dev partition
-│   ├── eval/                    # MTEB metrics & schema serialization
-│   ├── gate/                    # Static AST signature extraction
-│   └── verify/                  # Dual-harness sandbox, comparator & rarity boost
-├── requirements.lock            # Fully pinned reproducible environment
-├── requirements.txt
-├── BUILD.md
-├── Plan.md
-└── TASKS.md                     # 14-task project master plan
+vera/
+  data/       loader (parquet, same ids/texts as mteb's CoIR-Retrieval/apps), fixed 4,500/500 dev split
+  chassis/    preprocessing, DenseChassis (+ explicit tfidf reference), QB-Norm, LoRA trainer, negative mining
+  verify/     WorkedExampleParser, VerificationSandbox, comparator, TopKVerifier / GatedVerifier
+  gate/       static I/O signatures, example-shape gate, uncertainty router
+  mtebio/     VERASearchProtocol (mteb v2), encoder-only fallback, TaskResult serializer/validator
+  stage2/     version store, ingestion, fingerprints, version ranker
+  demo/       Gradio surface + UI-agnostic backend
+  eval/       dev-split metrics, ablation table generator
+scripts/      one entrypoint per milestone (table above)
+docs/         audit, gold-run gate, dev fits, ablations, risk register, SPOC inquiry
+artifacts/    MTEB TaskResult JSONs per rung
+tests/        pytest suite
 ```
 
----
+## Known limitations
 
-## 📄 License
+- The R1 LoRA fine-tune needs a GPU session and has not been trained; R2 currently sits on the zero-shot chassis.
+- LeetCode-style problems whose inputs are `TreeNode`/`ListNode` literals are not executed by the call harness (1 % of test).
+- Problems with several valid answers cannot be certified by the sample; the boost stays bounded so they are not penalised.
+- 98.3 % of test statements fit in 1,024 tokens; the 8,192-token context is kept because it is free, not because it moves the number.
 
-This project is licensed under the MIT License.
+License: MIT.
