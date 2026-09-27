@@ -1,170 +1,157 @@
 """
 VERA SearchProtocol Submission Interface
 ========================================
-Implements MTEB v2 SearchProtocol interface for custom retrieval pipelines.
-Allows end-to-end integration of dense embedding, dynamic verification,
-and calibrated score boosting within mteb.evaluate().
+Implements the MTEB v2 ``SearchProtocol`` (``index`` / ``search`` / ``mteb_model_meta``)
+so the whole pipeline (dense chassis -> optional top-K verification boost ->
+optional QB-Norm demotion) runs *inside* ``mteb.evaluate`` and the official
+``TaskResult`` JSON is produced by MTEB itself.
+
+Hard rule: this class only ever reads the ``id`` and ``text`` columns of the
+corpus/query datasets. ``partition`` and ``meta_information`` are never touched.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Union
+import time
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-# Attempt import of MTEB ModelMeta if available
-try:
-    from mteb.models.overview import ModelMeta
-    HAS_MTEB_META = True
-except ImportError:
-    try:
-        from mteb.encoder_interface import ModelMeta
-        HAS_MTEB_META = True
-    except ImportError:
-        HAS_MTEB_META = False
-        ModelMeta = None
+from vera.chassis.baseline import DenseChassis
+from vera.chassis.preprocess import ChassisPreprocessor
+
+try:  # ModelMeta lives in mteb.models.model_meta in mteb>=2
+    from mteb.models.model_meta import ModelMeta
+except Exception:  # pragma: no cover
+    ModelMeta = None  # type: ignore[assignment]
 
 
-class DummyModelMeta:
-    """Mock ModelMeta to satisfy MTEB inspection if ModelMeta is unavailable."""
-    def __init__(self, name: str = "VERA-SearchProtocol-Pipeline"):
-        self.name = name
-        self.revision = "1.0.0"
-        self.release_date = "2026-09-27"
-        self.languages = ["python"]
-        self.loader = None
-        self.n_parameters = None
-        self.memory_usage_mb = 512
-        self.max_tokens = 8192
-        self.embed_dim = 768
-        self.license = "mit"
-        self.open_weights = True
-        self.similarity_fn_name = "cosine"
-        self.use_instructions = False
-        self.framework = ["PyTorch", "ONNX"]
+def _ids_and_texts(data: Any) -> Tuple[List[str], List[str]]:
+    """Accept an HF ``Dataset`` (id/text columns), ``{id: text}``, ``{id: {"text": ..}}`` or ``[{"id":..,"text":..}]``."""
+    if hasattr(data, "column_names"):  # datasets.Dataset
+        ids = [str(x) for x in data["id"]]
+        texts = [str(x) for x in data["text"]]
+        return ids, texts
+    if isinstance(data, Mapping):
+        ids, texts = [], []
+        for k, v in data.items():
+            ids.append(str(k))
+            texts.append(str(v.get("text", "")) if isinstance(v, Mapping) else str(v))
+        return ids, texts
+    if isinstance(data, Sequence):
+        ids = [str(item.get("id", item.get("_id", i))) for i, item in enumerate(data)]
+        texts = [str(item.get("text", "")) for item in data]
+        return ids, texts
+    raise TypeError(f"Unsupported corpus/query container: {type(data)}")
+
+
+def build_model_meta(name: str, revision: str = "1.0.0", max_tokens: int = 8192, embed_dim: int = 768) -> Any:
+    """A ModelMeta that satisfies mteb's validators (or a plain namespace when mteb is unavailable)."""
+    if ModelMeta is None:  # pragma: no cover
+        return type("Meta", (), {"name": name, "revision": revision})()
+    return ModelMeta(
+        loader=None,
+        name=name,
+        revision=revision,
+        release_date="2026-09-27",
+        languages=["eng-Latn", "python-Code"],
+        n_parameters=149_000_000,
+        memory_usage_mb=570,
+        max_tokens=max_tokens,
+        embed_dim=embed_dim,
+        license="mit",
+        open_weights=True,
+        public_training_code=None,
+        public_training_data=None,
+        framework=["Sentence Transformers", "PyTorch"],
+        similarity_fn_name="cosine",
+        use_instructions=False,
+        training_datasets=None,
+    )
 
 
 class VERASearchProtocol:
-    """
-    Primary submission class implementing MTEB v2 SearchProtocol.
-    Exposes .index() and .search() interfaces.
+    """MTEB v2 SearchProtocol: dense retrieval + (optional) verification boost + (optional) QB-Norm.
+
+    Parameters
+    ----------
+    chassis : DenseChassis
+        The dense encoder/index (R0/R1).
+    verifier : TopKVerifier | None
+        When given, the top ``verify_top_k`` dense candidates of each query are executed on the
+        query's worked examples and re-scored (R2).
+    qbnorm : callable | None
+        ``fn(query_ids, sims) -> sims`` hook applied to the dense similarity matrix (R4).
+    name : str
+        Reported as the model name in the TaskResult (``org/model`` form).
     """
 
     def __init__(
         self,
-        name: str = "VERA-SearchProtocol-Pipeline",
-        dense_backend: Optional[Callable[[Dict[str, str], int], Dict[str, Dict[str, float]]]] = None,
-        verifier_backend: Optional[Callable[[str, List[str]], Dict[str, float]]] = None,
+        chassis: DenseChassis,
+        verifier: Optional[Any] = None,
+        verify_top_k: int = 150,
+        alpha: Optional[float] = None,
+        qbnorm: Optional[Any] = None,
+        name: str = "vera/VERA-R0-gte-modernbert-base",
+        remove_examples_from_query: bool = False,
+        query_tag: str = "queries",
     ):
+        self.chassis = chassis
+        self.verifier = verifier
+        self.verify_top_k = verify_top_k
+        self.alpha = alpha
+        self.qbnorm = qbnorm
         self.name = name
-        self.dense_backend = dense_backend
-        self.verifier_backend = verifier_backend
-        self.corpus_index: Dict[str, str] = {}
+        self.remove_examples_from_query = remove_examples_from_query
+        self.query_tag = query_tag
+        self.preprocessor = ChassisPreprocessor()
+        self.raw_corpus: Dict[str, str] = {}
+        self.timings: Dict[str, float] = {}
+        self._meta = build_model_meta(name, max_tokens=chassis.max_seq_length)
 
-        # Configure ModelMeta for MTEB v2
-        if HAS_MTEB_META and ModelMeta is not None:
-            try:
-                self.mteb_model_meta = ModelMeta(
-                    name=self.name,
-                    revision="1.0.0",
-                    release_date="2026-09-27",
-                    languages=["python"],
-                    loader=None,
-                    n_parameters=None,
-                    memory_usage_mb=512,
-                    max_tokens=8192,
-                    embed_dim=768,
-                    license="mit",
-                    open_weights=True,
-                    similarity_fn_name="cosine",
-                    use_instructions=False,
-                    framework=["PyTorch", "ONNX"],
-                )
-            except Exception:
-                self.mteb_model_meta = DummyModelMeta(name=self.name)
-        else:
-            self.mteb_model_meta = DummyModelMeta(name=self.name)
+    # ------------------------------------------------------------------ #
+    @property
+    def mteb_model_meta(self):
+        return self._meta
 
-    def index(self, corpus: Union[Dict[str, Dict[str, str]], List[Dict[str, str]], Dict[str, str]], **kwargs: Any) -> None:
-        """
-        Indexes the candidate corpus documents.
-        Corpus format from MTEB can be:
-          - dict[doc_id, {"text": "..."}]
-          - dict[doc_id, "text"]
-          - list[{"id": doc_id, "text": "..."}]
-        """
-        self.corpus_index.clear()
+    def index(self, corpus: Any, **kwargs: Any) -> None:
+        t0 = time.time()
+        ids, texts = _ids_and_texts(corpus)
+        self.raw_corpus = dict(zip(ids, texts))
+        stripped = self.preprocessor.process_corpus(self.raw_corpus)
+        self.chassis.index_corpus(stripped)
+        self.timings["index_s"] = time.time() - t0
+        print(f"[{self.name}] Indexed {len(ids)} docs in {self.timings['index_s']:.1f}s")
 
-        if isinstance(corpus, dict):
-            for doc_id, item in corpus.items():
-                if isinstance(item, dict):
-                    self.corpus_index[str(doc_id)] = item.get("text", "")
-                else:
-                    self.corpus_index[str(doc_id)] = str(item)
-        elif isinstance(corpus, list):
-            for item in corpus:
-                doc_id = str(item.get("id", item.get("_id", "")))
-                self.corpus_index[doc_id] = item.get("text", "")
+    def search(self, queries: Any, *, top_k: int = 1000, **kwargs: Any) -> Dict[str, Dict[str, float]]:
+        t0 = time.time()
+        qids, texts = _ids_and_texts(queries)
+        raw_queries = dict(zip(qids, texts))
+        clean = self.preprocessor.process_queries(raw_queries, remove_examples=self.remove_examples_from_query)
 
-        print(f"[{self.name}] Indexed {len(self.corpus_index)} corpus documents.")
+        split = kwargs.get("hf_split") or "test"
+        q_order, q_embs = self.chassis.encode_queries(clean, tag=f"{self.query_tag}-{split}")
+        sims = self.chassis.similarity(q_embs)
+        if self.qbnorm is not None:
+            sims = self.qbnorm(q_order, sims)
+        k = max(top_k, self.verify_top_k if self.verifier is not None else 0)
+        dense = self.chassis.topk_from_matrix(q_order, sims, k)
+        self.timings["dense_s"] = time.time() - t0
 
-    def search(
-        self,
-        queries: Union[Dict[str, str], List[str]],
-        top_k: int = 100,
-        **kwargs: Any,
-    ) -> Dict[str, Dict[str, float]]:
-        """
-        Executes search for input queries and returns score dictionary:
-        {query_id: {corpus_id: score, ...}, ...}
-        """
-        # Normalize queries format
-        norm_queries: Dict[str, str] = {}
-        if isinstance(queries, dict):
-            norm_queries = {str(qid): str(text) for qid, text in queries.items()}
-        elif isinstance(queries, list):
-            norm_queries = {str(i): str(text) for i, text in enumerate(queries)}
+        if self.verifier is None:
+            return {q: dict(list(r.items())[:top_k]) for q, r in dense.items()}
 
-        # If a custom dense backend is provided, execute it
-        if self.dense_backend is not None:
-            dense_results = self.dense_backend(norm_queries, top_k)
-        else:
-            # Fallback lightweight term-overlap or stub ranking for harness testing
-            dense_results = self._fallback_stub_search(norm_queries, top_k)
-
-        # If verification backend is configured, apply reranking/boosting
-        if self.verifier_backend is not None:
-            final_results: Dict[str, Dict[str, float]] = {}
-            for qid, q_text in norm_queries.items():
-                q_candidates = dense_results.get(qid, {})
-                boosts = self.verifier_backend(q_text, list(q_candidates.keys()))
-                # Apply additive blend
-                combined = {
-                    cid: float(q_candidates[cid]) + float(boosts.get(cid, 0.0))
-                    for cid in q_candidates
-                }
-                final_results[qid] = combined
-            return final_results
-
-        return dense_results
-
-    def _fallback_stub_search(self, queries: Dict[str, str], top_k: int) -> Dict[str, Dict[str, float]]:
-        """
-        Deterministic lightweight search stub for proof-of-life harness testing.
-        Uses exact token overlap without requiring GPU or large weights.
-        """
-        results: Dict[str, Dict[str, float]] = {}
-        corpus_items = list(self.corpus_index.items())
-
-        for qid, q_text in queries.items():
-            q_words = set(q_text.lower().split()[:50])
-            scores = []
-            for doc_id, doc_text in corpus_items[: min(top_k * 3, len(corpus_items))]:
-                doc_words = set(doc_text.lower().split()[:100])
-                overlap = len(q_words.intersection(doc_words))
-                score = overlap / max(1, len(q_words))
-                scores.append((doc_id, score))
-
-            # Sort and take top_k
-            scores.sort(key=lambda x: x[1], reverse=True)
-            results[qid] = {cid: float(s) for cid, s in scores[:top_k]}
-
-        return results
+        t1 = time.time()
+        out: Dict[str, Dict[str, float]] = {}
+        for i, qid in enumerate(q_order):
+            reranked = self.verifier.rerank_query(
+                query_text=raw_queries[qid],
+                dense_scores=dense[qid],
+                corpus_dict=self.raw_corpus,
+                top_k=self.verify_top_k,
+                alpha=self.alpha,
+            )
+            out[qid] = dict(list(reranked.items())[:top_k])
+            if (i + 1) % 200 == 0 or i + 1 == len(q_order):
+                print(f"[{self.name}] verified {i + 1}/{len(q_order)} queries ({time.time() - t1:.0f}s)", flush=True)
+        self.timings["verify_s"] = time.time() - t1
+        return out

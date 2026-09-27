@@ -16,7 +16,8 @@ This audit confirms the integrity and structural characteristics of the official
 | **Gold Docs per Query** | Exactly 1 (binary) | **1.0** (min=1, max=1) | **VERIFIED** |
 | **Dev Split Held-Out** | 500 fixed pairs | **500** (seed=42) | **VERIFIED** |
 | **Train Split Remaining** | 4,500 pairs | **4500** | **VERIFIED** |
-| **Parseable Example Rate** | ~78% claimed | **99.34%** (3740/3765) | **VERIFIED** |
+| **Parseable Example Rate (test)** | ~78% claimed by CtrlFind | **98.67%** (3715/3765) | **MEASURED** (real parser, `vera/verify/parser.py`) |
+| **Parseable Example Rate (train partition)** | — | **46.06%** (2303/5000) | **MEASURED** — train ≠ test distribution |
 
 ---
 
@@ -31,25 +32,39 @@ This audit confirms the integrity and structural characteristics of the official
   > **Zero Metadata Usage**: Under no circumstances does any scoring function, encoder, or re-ranker read document IDs (`_id`, `corpus-id`), query IDs (`query-id`), or dataset partition tags during search. All similarity and verification boosts operate strictly on raw text content (`problem_statement_text` and `solution_code_text`).
 
 ### Train/Test Partition Separation
-- Total corpus documents in collection: **8,765**.
-- The 5,000 train-partition solutions are part of the retrieval corpus.
+- Total corpus documents in collection: **8,765** = 5,000 train-partition golds + 3,765 test golds; every corpus
+  document is the gold of exactly one query, and the two gold sets are disjoint.
+- The MTEB copy of the dataset (`CoIR-Retrieval/apps`) exposes a `partition` column ("train"/"test") and a
+  `meta_information` column (`starter_code`, source `url`) on **both** corpus and queries. `VERASearchProtocol`
+  reads only `id` and `text`; `partition`, `meta_information`, `title` and `language` are never accessed.
+- The 5,000 train-partition solutions act as distractors for test queries.
 - **Content-Based Demotion**: Rather than filtering by forbidden partition tags, VERA implements **QB-Norm** (`vera/chassis/qbnorm.py`) in Rung R4, using the 5,000 public training statements as a semantic querybank to demote over-represented training solutions purely through content similarity.
 
 ---
 
 ## 3. Worked-Example Parseability Analysis
 
-APPS problem statements include worked input/output examples that define the functional specification. VERA transforms these examples into executable test cases.
+APPS problem statements include worked input/output examples that define the functional specification. VERA
+transforms these examples into executable test cases with `WorkedExampleParser` (the numbers below are produced by
+that parser, not by keyword heuristics).
 
-- **Total Test Queries Analyzed**: 3765
-- **Queries containing explicit "Example" markers**: 3133 (83.2%)
-- **Queries containing "Sample Input / Output"**: 765 (20.3%)
-- **Queries containing code fences (```)**: 1 (0.0%)
-- **Fully Parseable Input/Output Pairs**: **3740 (99.34%)**
-- **Unparseable / No Explicit Example**: 25 (0.7%)
+| Statement format | Test queries (3765) | Train partition (5000) |
+|---|---|---|
+| Codeforces `-----Examples-----` / `Input` / `Output` | 2947 (78.3%) | 819 (16.4%) |
+| AtCoder/CodeChef `-----Sample Input-----` / `-----Sample Output-----` | 722 (19.2%) | 729 (14.6%) |
+| LeetCode `Example N:` / `Input:` / `Output:` | 39 (1.0%) | 731 (14.6%) |
+| Bare `Sample Input` / `Sample Output` lines | 7 (0.2%) | 24 (0.5%) |
+| no parseable example | 50 (1.3%) | 2697 (53.9%) |
 
-**Implication for Verification Engine**:
-For ~99% of queries, VERA has high-confidence dynamic execution signals. For the remaining ~1% of queries without parseable examples, VERA relies gracefully on the L1 Chassis dense score floor.
+- **Test queries with ≥1 executable example**: **3715 (98.67%)** — examples per statement: 1 examples: 1233, 2 examples: 1189, 3 examples: 979, 4 examples: 252, 5+ examples: 62
+- **Test queries without**: 50 (1.3%) — reasons: no_example_section: 32, bare_markers_unusable: 12, examples_section_without_io_blocks: 4, image_only_or_no_example_section: 2
+- The `-----Input-----` / `-----Output-----` sections are *format specifications in prose*, never examples; the parser
+  ignores them. (An earlier keyword heuristic counted them and over-reported coverage.)
+
+**Implication for the verification engine**: for ~99% of test queries VERA has an executable oracle; the
+remaining ~1.3% fall back to the dense score alone. The train partition is dominated by LeetCode /
+Codewars-style function problems (no stdin sample), so any gold-run or verification statistic measured on train must be
+re-weighted to the test format mix (see `docs/goldrun.md`).
 
 ---
 

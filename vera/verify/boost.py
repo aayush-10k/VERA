@@ -1,73 +1,66 @@
 """
-VERA Rarity-Weighted Verification Boost & Top-K Re-Ranker
-=========================================================
-Implements Milestone M7 · Rung R2 (Guaranteed Fallback Ship):
-1. Rarity-Weighted Confidence:
-   conf(d, q) = (e_pass / E) * (1 / (1 + log2(m)))
-   where m is the count of top-K candidates producing the identical output
-   on example 1.
-2. Score Blending:
-   S_final(d, q) = norm(S_dense(d, q)) + alpha * conf(d, q)
-3. Grid Search Calibration:
-   Fits alpha in [0.05, 0.40] on the 500-pair dev split to maximize NDCG@10.
+VERA Rarity-Weighted Verification Boost & Top-K Re-Ranker (Rung R2)
+==================================================================
+1. Rarity-weighted confidence
+       conf(d, q) = (e_pass / E) * 1 / (1 + log2(m))
+   where m is the number of top-K candidates whose output on example 1 matches the
+   expected output (a bare "4" that half the pool prints is worth little; a 47-line
+   exact match is near-proof).
+2. Score blending
+       S_final(d, q) = norm(S_dense(d, q)) + alpha * conf(d, q)
+   with dense scores min-max normalised over the candidate pool. The boost is additive
+   and bounded: non-passers are never filtered, a decisive dense margin is never
+   overridden by a low-confidence pass.
+3. alpha is grid-fit on the 500-pair dev split (``scripts/m7_topk_verify.py``).
+
+Verification of the K candidates runs in parallel on the sandbox worker pool. The
+expensive part (running code) is separated from the cheap part (blending with alpha)
+so the dev grid search verifies each query exactly once.
 """
 
 from __future__ import annotations
 
 import math
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from vera.verify.executor import CandidateVerificationResult, VerificationSandbox
-from vera.verify.parser import ExamplePair, WorkedExampleParser
+from vera.verify.parser import ExamplePair, WorkedExampleParser, statement_allows_any_order
 
 
-def compute_rarity_confidence(
-    passed_examples: int,
-    total_examples: int,
-    identical_output_count: int,
-) -> float:
-    """Compute rarity-discounted verification confidence in [0.0, 1.0].
-
-    Parameters
-    ----------
-    passed_examples : int
-        Number of worked examples the candidate passed (e_pass).
-    total_examples : int
-        Total number of worked examples extracted (E).
-    identical_output_count : int
-        Number of candidates in top-K producing identical output on example 1 (m).
-
-    Returns
-    -------
-    float
-        Confidence boost score in [0.0, 1.0].
-    """
+def compute_rarity_confidence(passed_examples: int, total_examples: int, identical_output_count: int) -> float:
+    """conf = (e_pass / E) * 1 / (1 + log2(m)), clipped to [0, 1]."""
     if total_examples <= 0 or passed_examples <= 0:
         return 0.0
-
     pass_ratio = passed_examples / total_examples
     m = max(1, identical_output_count)
-    rarity_weight = 1.0 / (1.0 + math.log2(m))
-    conf = pass_ratio * rarity_weight
-
+    conf = pass_ratio / (1.0 + math.log2(m))
     return min(1.0, max(0.0, conf))
 
 
 def min_max_normalize(scores: Dict[str, float]) -> Dict[str, float]:
-    """Normalize score values into [0.0, 1.0] across candidate pool."""
+    """Normalize score values into [0, 1] across the candidate pool."""
     if not scores:
         return {}
-
     values = list(scores.values())
-    min_v = min(values)
-    max_v = max(values)
-
-    if max_v - min_v < 1e-9:
+    lo, hi = min(values), max(values)
+    if hi - lo < 1e-9:
         return {k: 1.0 for k in scores}
+    return {k: (v - lo) / (hi - lo) for k, v in scores.items()}
 
-    return {k: (v - min_v) / (max_v - min_v) for k, v in scores.items()}
+
+@dataclass
+class QueryVerification:
+    """Everything the boost needs for one query, computed once (alpha-independent)."""
+
+    n_examples: int
+    conf: Dict[str, float] = field(default_factory=dict)        # doc_id -> rarity-weighted confidence
+    passed: Dict[str, int] = field(default_factory=dict)        # doc_id -> examples passed
+    m_first: int = 0                                            # candidates matching example 1
+    n_all_pass: int = 0                                         # candidates passing every example
+    runtime_ms: float = 0.0
+    statuses: Dict[str, int] = field(default_factory=dict)      # status histogram over first runs
 
 
 @dataclass
@@ -84,18 +77,64 @@ class CandidateBoostInfo:
 
 
 class TopKVerifier:
-    """Verifies top-K dense retrieval candidates and applies calibrated rarity boost."""
+    """Verifies top-K dense candidates and applies the calibrated rarity boost."""
 
     def __init__(
         self,
         sandbox: Optional[VerificationSandbox] = None,
         parser: Optional[WorkedExampleParser] = None,
         default_alpha: float = 0.20,
+        workers: Optional[int] = None,
     ):
-        self.sandbox = sandbox or VerificationSandbox(default_timeout=0.06, reduced_timeout=0.02)
+        self.sandbox = sandbox or VerificationSandbox(default_timeout=0.75, reduced_timeout=0.30, workers=workers)
         self.parser = parser or WorkedExampleParser()
         self.alpha = default_alpha
 
+    def close(self) -> None:
+        self.sandbox.close()
+
+    # ------------------------------------------------------------------ #
+    def verify_query(self, query_text: str, candidate_ids: List[str], corpus_dict: Dict[str, str]) -> QueryVerification:
+        """Run every candidate on the query's examples; return alpha-independent confidences."""
+        examples = self.parser.parse_examples(query_text)
+        if not examples:
+            return QueryVerification(n_examples=0)
+        any_order = statement_allows_any_order(query_text)
+        results = self.sandbox.verify_many(
+            [(doc_id, corpus_dict.get(doc_id, "")) for doc_id in candidate_ids], examples, multiline_set=any_order
+        )
+        return self.summarize(results, len(examples))
+
+    @staticmethod
+    def summarize(results: Dict[str, CandidateVerificationResult], n_examples: int) -> QueryVerification:
+        qv = QueryVerification(n_examples=n_examples)
+        # m = number of candidates whose output on example 1 matched (i.e. passed example 1)
+        first_pass = [doc for doc, r in results.items() if r.results and r.results[0].matched]
+        qv.m_first = len(first_pass)
+        statuses: Counter = Counter()
+        for doc_id, r in results.items():
+            qv.passed[doc_id] = r.passed_examples
+            qv.conf[doc_id] = compute_rarity_confidence(r.passed_examples, n_examples, qv.m_first if r.passed_examples > 0 else 1)
+            qv.runtime_ms += r.total_runtime_ms
+            if r.all_passed:
+                qv.n_all_pass += 1
+            if r.results:
+                statuses[r.results[0].status] += 1
+        qv.statuses = dict(statuses)
+        return qv
+
+    @staticmethod
+    def blend(dense_scores: Dict[str, float], qv: QueryVerification, alpha: float, top_k: int) -> Dict[str, float]:
+        """S_final = norm(dense) + alpha * conf for the verified top-K; tail keeps norm(dense)."""
+        norm = min_max_normalize(dense_scores)
+        ordered = sorted(dense_scores.items(), key=lambda kv: kv[1], reverse=True)
+        out: Dict[str, float] = {}
+        for i, (doc_id, _) in enumerate(ordered):
+            conf = qv.conf.get(doc_id, 0.0) if i < top_k else 0.0
+            out[doc_id] = norm[doc_id] + alpha * conf
+        return dict(sorted(out.items(), key=lambda kv: kv[1], reverse=True))
+
+    # ------------------------------------------------------------------ #
     def rerank_query(
         self,
         query_text: str,
@@ -103,73 +142,14 @@ class TopKVerifier:
         corpus_dict: Dict[str, str],
         top_k: int = 150,
         alpha: Optional[float] = None,
-    ) -> Dict[str, float]:
-        """Re-ranks top-K dense candidate documents for a single query using verification.
-
-        Parameters
-        ----------
-        query_text : str
-            Natural language problem statement.
-        dense_scores : Dict[str, float]
-            Dictionary of doc_id -> dense retrieval score.
-        corpus_dict : Dict[str, str]
-            Dictionary of doc_id -> raw code string.
-        top_k : int
-            Maximum number of dense candidates to verify (default 150).
-        alpha : Optional[float]
-            Verification boost weight. If None, uses self.alpha.
-
-        Returns
-        -------
-        Dict[str, float]
-            Re-ranked dictionary of doc_id -> final blended score.
-        """
+        return_verification: bool = False,
+    ):
+        """Re-rank one query: verify its dense top-K, then blend with alpha."""
         effective_alpha = self.alpha if alpha is None else alpha
-
-        # Sort candidate documents by dense score and select top_k
-        sorted_candidates = sorted(dense_scores.items(), key=lambda kv: kv[1], reverse=True)
-        top_slice = sorted_candidates[:top_k]
-        top_candidate_ids = [doc_id for doc_id, _ in top_slice]
-        top_dense_map = {doc_id: score for doc_id, score in top_slice}
-
-        # Min-max normalize dense scores across the candidate pool
-        norm_dense = min_max_normalize(dense_scores)
-
-        # Parse worked examples from query
-        examples = self.parser.parse_examples(query_text)
-        if not examples:
-            # If no examples are available, return normalized dense scores untouched
-            return dict(sorted(norm_dense.items(), key=lambda kv: kv[1], reverse=True))
-
-        # Run verification sandbox on top-K candidates
-        verification_results: Dict[str, CandidateVerificationResult] = {}
-        for doc_id in top_candidate_ids:
-            code = corpus_dict.get(doc_id, "")
-            res = self.sandbox.verify_candidate(code, examples)
-            verification_results[doc_id] = res
-
-        # Count frequencies of identical first outputs (m) among passing candidates
-        first_outputs: List[str] = [
-            res.first_output for res in verification_results.values() if res.passed_examples > 0 and res.first_output
-        ]
-        output_counter = Counter(first_outputs)
-
-        # Compute blended scores
-        blended_scores: Dict[str, float] = {}
-        for doc_id in top_candidate_ids:
-            res = verification_results[doc_id]
-            m = output_counter.get(res.first_output, 1)
-            conf = compute_rarity_confidence(
-                passed_examples=res.passed_examples,
-                total_examples=len(examples),
-                identical_output_count=m,
-            )
-            s_dense_norm = norm_dense.get(doc_id, 0.0)
-            s_final = s_dense_norm + effective_alpha * conf
-            blended_scores[doc_id] = s_final
-
-        # Preserve the unverified tail candidates with their normalized dense scores
-        for doc_id, _ in sorted_candidates[top_k:]:
-            blended_scores[doc_id] = norm_dense.get(doc_id, 0.0)
-
-        return dict(sorted(blended_scores.items(), key=lambda kv: kv[1], reverse=True))
+        ordered = sorted(dense_scores.items(), key=lambda kv: kv[1], reverse=True)
+        top_ids = [doc_id for doc_id, _ in ordered[:top_k]]
+        qv = self.verify_query(query_text, top_ids, corpus_dict)
+        blended = self.blend(dense_scores, qv, effective_alpha, top_k)
+        if return_verification:
+            return blended, qv
+        return blended

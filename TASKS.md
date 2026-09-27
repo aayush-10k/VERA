@@ -513,15 +513,20 @@ flowchart TD
 
 ## 5. Milestone Tracking & Verification Checklist
 
-- [x] **Task 01**: Environment pinned, data split created, leakage audit written in `docs/dataset-audit.md`
-- [x] **Task 02**: `mtebio/` dual harness emits schema-valid `TaskResult` JSON
-- [x] **Task 03**: Rung R0 baseline reproduced ($NDCG@10 \ge 0.575$)
-- [x] **Task 04**: Chassis fine-tuned with LoRA, exported to ONNX int8 (Rung R1 complete)
-- [x] **Task 05**: Worked-example parser and AST signature extractor unit-tested ($\ge 75\%$ parse rate)
-- [x] **Task 06**: High-speed sandbox and normalized comparator operational ($\le 10$ ms dispatch overhead)
-- [x] **Task 07**: 300-pair gold-run completed, gate logged in `docs/goldrun.md`
-- [x] **Task 08**: Rarity-weighted Top-K boost tuned on dev (Rung R2 guaranteed fallback secured)
-- [ ] **Task 09**: Uncertainty router & signature gate evaluated (Rung R3 conditional adoption)
+> **Status audit (2026-09-27).** An earlier revision of this checklist marked Tasks 01–08 done while every milestone JSON
+> was at chance level (R0 NDCG@10 = 0.0025 on a 200-query sample from a TF-IDF fallback; R1/R2 = 0.0) and the gold-run
+> read 6% because the parser was feeding the `-----Input-----` *specification* prose to the programs. Those marks were
+> reset. A task is checked below only when its exit criterion in Plan.md has been measured and the artifact exists.
+
+- [x] **Task 01**: Environment pinned (`requirements.lock`, transformers ≥ 4.48 for ModernBERT), fixed 4,500/500 split committed, leakage audit regenerated with the real parser in `docs/dataset-audit.md` (test parse rate 98.67%; train partition 46.06% — train ≠ test format mix; `partition`/`meta_information` columns identified and quarantined)
+- [x] **Task 02**: `VERASearchProtocol` implements MTEB v2 `SearchProtocol`; `mteb.evaluate` drives index/search and emits the official `TaskResult` JSON (validated: `artifacts/m2_proof_of_life.json`, TF-IDF reference NDCG@10 = 0.0262)
+- [ ] **Task 03**: Rung R0 with the real `gte-modernbert-base` at 8192 context on the full 3,765-query test split — **running**; exit gate NDCG@10 ≥ 0.575 not yet measured. (Earlier "R0" artifact was a TF-IDF fallback on 200 queries and has been discarded.)
+- [ ] **Task 04**: LoRA fine-tune (R1) — **not started**. `vera/chassis/train.py` is a sketch; no model, no ONNX export, no measured dev delta. Requires a GPU session (Colab) per Plan.md.
+- [x] **Task 05**: Worked-example parser rewritten around the measured formats (Codeforces 78%, AtCoder/CodeChef 19%, LeetCode 1%): 98.67% test coverage, unit-tested; AST signature extractor present (its coverage on the corpus is not yet measured)
+- [x] **Task 06**: Sandbox rebuilt as process-isolated fork-per-run workers (real `SIGKILL` timeouts, rlimits, temp CWD, dual harness, py2/`return`-outside-function rescue), ~4–6 ms dispatch; normalized comparator incl. Python-literal equality; `tests/test_executor.py` green
+- [x] **Task 07**: Gold-run re-measured with the fixed parser+sandbox: 87.2% pass given a parseable example; projected 86.7% on the test format mix → gate = `CORPUS_WIDE_UNLOCKED` (`docs/goldrun.md`)
+- [ ] **Task 08**: R2 top-K boost — implementation done (`vera/verify/boost.py`, `scripts/m7_topk_verify.py`); α fit on dev and test JSON **pending the R0 embeddings**
+- [ ] **Task 09**: Uncertainty router & signature gate evaluated (Rung R3 — unlocked by the M4 gate, not yet built)
 - [ ] **Task 10**: QB-Norm demotion active, `docs/ablations.md` generated, final R4 JSON emitted
 - [ ] **Task 11**: AST version store and Git/snapshot ingestion benchmarked ($>10\times$ speedup)
 - [ ] **Task 12**: Behavior fingerprinting and diff-line ranker pass synthetic benchmark

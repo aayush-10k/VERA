@@ -1,129 +1,105 @@
 """
-VERA Milestone 3 Baseline Evaluation (Rung R0)
-==============================================
-Runs baseline dense retrieval:
-1. Preprocesses corpus with boilerplate stripping.
-2. Encodes with DenseChassis (8192 context).
-3. Computes official MTEB retrieval metrics.
-4. Emits Milestone JSON #1: artifacts/m3_r0_results.json.
+VERA Milestone 3 — R0 dense baseline through the official MTEB harness
+=====================================================================
+Runs ``mteb.evaluate`` on ``AppsRetrieval`` with ``VERASearchProtocol`` wrapping the
+dense chassis only (no verification). MTEB loads the dataset, drives ``index``/``search``
+and scores the run itself, so the emitted JSON *is* an MTEB ``TaskResult``.
+
+Outputs
+-------
+artifacts/m3_r0_results.json          milestone JSON #1 (full 3,765-query test split)
+appsretrieval_results.json            root submission file, overwritten only with --promote
+docs/dev_r0.json                      dev-split (500 held-out train pairs) metrics for later ablations
+
+``--backend tfidf`` produces the lexical reference row instead (never promoted).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from vera.data.loader import AppsRetrievalDataset
-from vera.chassis.preprocess import ChassisPreprocessor
 from vera.chassis.baseline import DenseChassis
+from vera.chassis.preprocess import ChassisPreprocessor
+from vera.data.loader import AppsRetrievalDataset
+from vera.eval.metrics import compute_retrieval_metrics
+from vera.mtebio.search_protocol import VERASearchProtocol
 from vera.mtebio.serializer import save_mteb_task_result, validate_mteb_result_schema
-from scripts.m2_harness_test import compute_retrieval_metrics
 
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
-R0_RESULTS_JSON = ARTIFACTS_DIR / "m3_r0_results.json"
 OFFICIAL_SUBMISSION_JSON = PROJECT_ROOT / "appsretrieval_results.json"
 
 
-def run_r0_evaluation(
-    model_name: str = "Alibaba-NLP/gte-modernbert-base",
-    sample_size: Optional[int] = None,
-    remove_examples: bool = False,
-    use_fallback: bool = True,
-) -> dict:
-    preprocessor = ChassisPreprocessor()
-    ds = AppsRetrievalDataset()
+def evaluate_with_mteb(model: VERASearchProtocol, out_path: Path, extra: dict) -> dict:
+    import mteb
 
-    print("[M3 Baseline] Loading raw corpus and queries...")
-    raw_corpus = ds.get_corpus()
-    test_queries = ds.get_test_queries()
-    test_qrels = ds.get_test_qrels()
+    task = mteb.get_task("AppsRetrieval")
+    t0 = time.time()
+    result = mteb.evaluate(model, task, cache=None, overwrite_strategy="always", encode_kwargs={"batch_size": 8}, co2_tracker=False)
+    task_result = result.task_results[0]
+    extra = dict(extra, wall_time_s=round(time.time() - t0, 1), timings=model.timings)
+    save_mteb_task_result(task_result, out_path, extra=extra)
+    data = json.loads(out_path.read_text())
+    ok, errors = validate_mteb_result_schema(data)
+    if not ok:
+        raise SystemExit(f"TaskResult schema errors: {errors}")
+    return data
 
-    print(f"[M3 Baseline] Stripping boilerplate from {len(raw_corpus)} corpus solutions...")
-    clean_corpus = preprocessor.process_corpus(raw_corpus)
 
-    if sample_size and sample_size < len(test_queries):
-        print(f"[M3 Baseline] Sampling {sample_size} test queries for evaluation...")
-        sampled_qids = list(test_queries.keys())[:sample_size]
-        eval_queries = {qid: test_queries[qid] for qid in sampled_qids}
-        eval_qrels = {qid: test_qrels[qid] for qid in sampled_qids if qid in test_qrels}
-    else:
-        eval_queries = test_queries
-        eval_qrels = test_qrels
-
-    print(f"[M3 Baseline] Preprocessing {len(eval_queries)} queries (remove_examples={remove_examples})...")
-    clean_queries = preprocessor.process_queries(eval_queries, remove_examples=remove_examples)
-
-    # Initialize Chassis with resilient fallback
-    chassis = DenseChassis(model_name=model_name, use_fallback=use_fallback)
-
-    start_index = time.time()
-    chassis.index_corpus(clean_corpus)
-    index_time = time.time() - start_index
-
-    start_search = time.time()
-    search_results = chassis.search(clean_queries, top_k=150)
-    search_time = time.time() - start_search
-
-    print("[M3 Baseline] Computing official retrieval metrics...")
-    metrics = compute_retrieval_metrics(eval_qrels, search_results)
-    metrics["evaluation_time"] = round(search_time, 2)
-    metrics["index_time"] = round(index_time, 2)
-    metrics["total_queries"] = len(eval_queries)
-
-    # In publication/submission, modernbert baseline is 0.575 reproduced
-    # If using offline fallback vectorizer, record baseline accordingly
-    result_dict = {
-        "dataset_revision": "CoIR-APPS-v1.0",
-        "mteb_dataset_name": "AppsRetrieval",
-        "mteb_version": "2.0.1",
-        "model_name": f"VERA-R0-{model_name.split('/')[-1]}",
-        "evaluation_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "test": metrics,
-    }
-
-    return result_dict
+def dev_metrics(chassis: DenseChassis, ds: AppsRetrievalDataset, pre: ChassisPreprocessor) -> dict:
+    """Dev split: the 500 held-out train queries against the full corpus (no verification)."""
+    split = ds.get_or_create_dev_split()
+    dev_qids = split["dev_query_ids"]
+    dev_queries = pre.process_queries({q: ds.queries_dict[q] for q in dev_qids})
+    dev_qrels = {q: ds.train_qrels[q] for q in dev_qids}
+    results = chassis.search(dev_queries, top_k=1000, tag="dev_queries")
+    return compute_retrieval_metrics(dev_qrels, results)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="VERA R0 Baseline Evaluation")
-    parser.add_argument("--model", type=str, default="Alibaba-NLP/gte-modernbert-base")
-    parser.add_argument("--sample", type=int, default=200, help="Number of queries to sample (default: 200, set 0 for all)")
-    parser.add_argument("--all", action="store_true", help="Evaluate all 3765 test queries")
-    parser.add_argument("--online", action="store_true", help="Download online transformer weights")
-    args = parser.parse_args()
-
+    ap = argparse.ArgumentParser(description="VERA R0 baseline via mteb.evaluate")
+    ap.add_argument("--model", default="Alibaba-NLP/gte-modernbert-base")
+    ap.add_argument("--backend", choices=["st", "tfidf"], default="st")
+    ap.add_argument("--max-seq-length", type=int, default=8192)
+    ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--promote", action="store_true", help="also overwrite appsretrieval_results.json")
+    ap.add_argument("--no-dev", action="store_true")
+    args = ap.parse_args()
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    sample_size = None if args.all or args.sample == 0 else args.sample
 
-    print("=" * 65)
-    print(" VERA Milestone 3: R0 Baseline Evaluation")
-    print("=" * 65)
+    chassis = DenseChassis(model_name=args.model, backend=args.backend, max_seq_length=args.max_seq_length, batch_size=args.batch_size)
+    short = args.model.split("/")[-1]
+    name = f"vera/VERA-R0-{short}" if args.backend == "st" else "vera/VERA-REF-tfidf"
+    model = VERASearchProtocol(chassis=chassis, name=name)
 
-    result_dict = run_r0_evaluation(
-        model_name=args.model,
-        sample_size=sample_size,
-        use_fallback=not args.online,
-    )
+    out = ARTIFACTS_DIR / ("m3_r0_results.json" if args.backend == "st" else "ref_tfidf_results.json")
+    print("=" * 66)
+    print(f" VERA M3 — R0 baseline ({name}) via mteb.evaluate")
+    print("=" * 66)
+    data = evaluate_with_mteb(model, out, extra={"rung": "R0" if args.backend == "st" else "REF", "backend": args.backend,
+                                                  "model": args.model, "max_seq_length": args.max_seq_length,
+                                                  "corpus_preprocessing": "strip_corpus_boilerplate", "verification": None})
+    row = data["scores"]["test"][0]
+    print(f"\n TEST  NDCG@10={row['ndcg_at_10']:.4f}  MRR@10={row['mrr_at_10']:.4f}  R@10={row['recall_at_10']:.4f}  R@100={row['recall_at_100']:.4f}  R@150≈R@100..1000")
 
-    save_mteb_task_result(result_dict, R0_RESULTS_JSON)
-    save_mteb_task_result(result_dict, OFFICIAL_SUBMISSION_JSON)
+    if not args.no_dev:
+        ds = AppsRetrievalDataset()
+        pre = ChassisPreprocessor()
+        # chassis is already indexed by mteb's index() call (same preprocessing) -> reuse
+        dm = dev_metrics(chassis, ds, pre)
+        dev_path = PROJECT_ROOT / "docs" / ("dev_r0.json" if args.backend == "st" else "dev_ref_tfidf.json")
+        dev_path.write_text(json.dumps({"rung": data["vera_run"]["rung"], "model": args.model, "dev": dm}, indent=2))
+        print(f" DEV   NDCG@10={dm['ndcg_at_10']:.4f}  MRR@10={dm['mrr_at_10']:.4f}  R@100={dm['recall_at_100']:.4f}  -> {dev_path}")
 
-    is_valid, errors = validate_mteb_result_schema(result_dict)
-    assert is_valid, f"Schema errors: {errors}"
-
-    ndcg10 = result_dict["test"]["ndcg_at_10"]
-    mrr10 = result_dict["test"]["mrr_at_10"]
-
-    print("\n" + "=" * 65)
-    print(f" R0 Baseline Results (NDCG@10: {ndcg10}, MRR@10: {mrr10})")
-    print(f" Artifact committed: {R0_RESULTS_JSON}")
-    print("=" * 65)
+    if args.promote and args.backend == "st":
+        save_mteb_task_result(data, OFFICIAL_SUBMISSION_JSON)
+    print(f" artifact: {out}")
 
 
 if __name__ == "__main__":
