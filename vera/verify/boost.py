@@ -85,25 +85,74 @@ class TopKVerifier:
         parser: Optional[WorkedExampleParser] = None,
         default_alpha: float = 0.20,
         workers: Optional[int] = None,
+        cache_path: Optional[str] = None,
     ):
         self.sandbox = sandbox or VerificationSandbox(default_timeout=0.75, reduced_timeout=0.30, workers=workers)
         self.parser = parser or WorkedExampleParser()
         self.alpha = default_alpha
+        # Optional on-disk cache of alpha-independent verification results, keyed by (query text, candidate ids).
+        # Lets the test split be verified once and re-blended with any alpha (e.g. after the dev fit).
+        self.cache_path = cache_path
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._cache_dirty = 0
+        if cache_path:
+            import json
+            import os
+
+            if os.path.exists(cache_path):
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    self._cache = json.load(f)
 
     def close(self) -> None:
+        self.flush_cache()
         self.sandbox.close()
+
+    def flush_cache(self) -> None:
+        if self.cache_path and self._cache_dirty:
+            import json
+
+            tmp = self.cache_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._cache, f)
+            import os
+
+            os.replace(tmp, self.cache_path)
+            self._cache_dirty = 0
+
+    @staticmethod
+    def _cache_key(query_text: str, candidate_ids: List[str]) -> str:
+        import hashlib
+
+        h = hashlib.sha1(query_text.encode("utf-8", errors="ignore"))
+        h.update(("|" + ",".join(candidate_ids)).encode("utf-8"))
+        return h.hexdigest()
 
     # ------------------------------------------------------------------ #
     def verify_query(self, query_text: str, candidate_ids: List[str], corpus_dict: Dict[str, str]) -> QueryVerification:
         """Run every candidate on the query's examples; return alpha-independent confidences."""
+        key = self._cache_key(query_text, candidate_ids) if self.cache_path else None
+        if key is not None and key in self._cache:
+            d = self._cache[key]
+            qv = QueryVerification(n_examples=d["n_examples"])
+            qv.conf, qv.passed, qv.m_first, qv.n_all_pass = d["conf"], d["passed"], d["m_first"], d["n_all_pass"]
+            qv.runtime_ms, qv.statuses = d.get("runtime_ms", 0.0), d.get("statuses", {})
+            return qv
         examples = self.parser.parse_examples(query_text)
         if not examples:
-            return QueryVerification(n_examples=0)
-        any_order = statement_allows_any_order(query_text)
-        results = self.sandbox.verify_many(
-            [(doc_id, corpus_dict.get(doc_id, "")) for doc_id in candidate_ids], examples, multiline_set=any_order
-        )
-        return self.summarize(results, len(examples))
+            qv = QueryVerification(n_examples=0)
+        else:
+            any_order = statement_allows_any_order(query_text)
+            results = self.sandbox.verify_many(
+                [(doc_id, corpus_dict.get(doc_id, "")) for doc_id in candidate_ids], examples, multiline_set=any_order
+            )
+            qv = self.summarize(results, len(examples))
+        if key is not None:
+            self._cache[key] = {"n_examples": qv.n_examples, "conf": qv.conf, "passed": qv.passed, "m_first": qv.m_first,
+                                "n_all_pass": qv.n_all_pass, "runtime_ms": qv.runtime_ms, "statuses": qv.statuses}
+            self._cache_dirty += 1
+            if self._cache_dirty >= 200:
+                self.flush_cache()
+        return qv
 
     @staticmethod
     def summarize(results: Dict[str, CandidateVerificationResult], n_examples: int) -> QueryVerification:

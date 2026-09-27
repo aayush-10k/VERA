@@ -75,7 +75,11 @@ def main():
 
     from vera.verify.executor import VerificationSandbox
 
-    verifier = TopKVerifier(sandbox=VerificationSandbox(default_timeout=args.timeout, reduced_timeout=0.3, workers=args.workers))
+    # alpha-independent verification results are cached on disk, so the test split is executed once and can be
+    # re-blended with the alpha selected on dev without re-running any code
+    verif_cache_path = chassis.cache_dir / f"r2_verification_{args.model.split('/')[-1]}_k{args.top_k}_t{args.timeout}.json"
+    verifier = TopKVerifier(sandbox=VerificationSandbox(default_timeout=args.timeout, reduced_timeout=0.3, workers=args.workers),
+                            cache_path=str(verif_cache_path))
 
     # ---- dev: verify once, sweep alpha -------------------------------------------
     selected_alpha = args.alpha
@@ -131,6 +135,7 @@ def main():
         print(f"[M7] dev R0 NDCG@10={base_metrics['ndcg_at_10']:.4f} -> R2 NDCG@10={sweep[selected_alpha]['ndcg_at_10']:.4f} "
               f"at alpha={selected_alpha} (best {best_alpha}); gold in top-{args.top_k}: {n_gold_in_topk}/{len(dev_qids)}, "
               f"gold passes: {n_gold_pass}; -> {DEV_R2_JSON}")
+        verifier.flush_cache()
         if args.dev_only:
             verifier.close()
             return
