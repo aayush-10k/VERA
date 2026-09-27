@@ -12,41 +12,46 @@
       {
         "ref": "v2",
         "records": 200,
-        "new": 199,
-        "unchanged": 1
+        "new": 91,
+        "unchanged": 109
       },
       {
         "ref": "v3",
         "records": 200,
-        "new": 0,
-        "unchanged": 200
+        "new": 108,
+        "unchanged": 92
       }
     ],
     "distinct_snippets_embedded": 399,
     "snippet_versions_total": 600,
-    "incremental_embed_s": 0.31,
-    "full_reembed_s": 0.45,
-    "speedup": 1.43,
+    "incremental_embed_s": 0.29,
+    "full_reembed_s": 0.49,
+    "speedup": 1.68,
     "repo_history": {
       "files": 200,
       "commits": 20,
-      "snippets_embedded_incremental": 240,
+      "snippets_embedded_incremental": 238,
       "snippets_embedded_full": 4000,
       "incremental_s": 0.08,
-      "full_reembed_s": 1.06,
-      "speedup": 13.17
+      "full_reembed_s": 1.07,
+      "speedup": 14.19
     }
   },
   "s2_s3": {
     "n": 200,
-    "both_pass": 56,
-    "v3_certified_unchanged": 200,
-    "v1_v2_fingerprint_differs": 161,
-    "v1_v2_differs_on_both_pass": 19,
-    "working_first": 154,
-    "working_first_both_pass": 11,
-    "dense_only_working_first": 119,
-    "dense_only_working_first_both_pass": 34,
-    "wall_s": 53.7
+    "both_pass": 59,
+    "regression_chains": 109,
+    "refactor_certified_unchanged": 197,
+    "bug_fingerprint_differs": 157,
+    "bug_differs_on_both_pass": 20,
+    "working_first": 179,
+    "working_first_both_pass": 39,
+    "no_consensus_working_first": 172,
+    "no_consensus_working_first_both_pass": 32,
+    "dense_only_working_first": 103,
+    "dense_only_working_first_both_pass": 33,
+    "recency_working_first": 91,
+    "recency_working_first_both_pass": 27,
+    "wall_s": 65.3
   }
 }

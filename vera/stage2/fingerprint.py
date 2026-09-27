@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from vera.gate.router import example_shape
+from vera.stage2.store import snippet_id
 from vera.verify.executor import VerificationSandbox
 
 _INT_RE = re.compile(r"^[-+]?\d+$")
@@ -134,8 +135,10 @@ class FingerprintIndex:
         return key, self.batteries[key]
 
     def fingerprint(self, sid: str, code: str, example_stdin: str) -> Fingerprint:
+        """``sid`` is only a label; the cache is keyed by the code's normalized-AST id, so a reformatted version
+        shares its predecessor's fingerprint without being re-run (identical AST => identical behaviour)."""
         key, probes = self.battery_for(example_stdin)
-        cache_key = (sid, key)
+        cache_key = (snippet_id(code), key)
         if cache_key not in self.fingerprints:
             self.fingerprints[cache_key] = fingerprint_program(code, probes, self.sandbox)
         return self.fingerprints[cache_key]

@@ -1,7 +1,9 @@
-"""Problem statement worked example parser, execution sandboxes, normalized comparator, and rarity boost."""
+"""Worked-example parser, process-isolated execution sandbox, normalized comparator, rarity boost."""
 
 from vera.verify.boost import (
     CandidateBoostInfo,
+    GatedVerifier,
+    QueryVerification,
     TopKVerifier,
     compute_rarity_confidence,
     min_max_normalize,
@@ -13,22 +15,15 @@ from vera.verify.executor import (
     ExecutionResult,
     ExecutionSandbox,
     VerificationSandbox,
+    detect_call_entry,
+    run_isolated,
 )
-from vera.verify.parser import ExamplePair, WorkedExampleParser
+from vera.verify.parser import ExamplePair, ParseReport, WorkedExampleParser, statement_allows_any_order
 
 __all__ = [
-    "CandidateBoostInfo",
-    "TopKVerifier",
-    "compute_rarity_confidence",
-    "min_max_normalize",
-    "ComparisonResult",
-    "compare_outputs",
-    "evaluate_comparison",
-    "AdaptiveTimeoutTracker",
-    "CandidateVerificationResult",
-    "ExecutionResult",
-    "ExecutionSandbox",
-    "VerificationSandbox",
-    "ExamplePair",
-    "WorkedExampleParser",
+    "CandidateBoostInfo", "GatedVerifier", "QueryVerification", "TopKVerifier", "compute_rarity_confidence", "min_max_normalize",
+    "ComparisonResult", "compare_outputs", "evaluate_comparison",
+    "AdaptiveTimeoutTracker", "CandidateVerificationResult", "ExecutionResult", "ExecutionSandbox", "VerificationSandbox",
+    "detect_call_entry", "run_isolated",
+    "ExamplePair", "ParseReport", "WorkedExampleParser", "statement_allows_any_order",
 ]
