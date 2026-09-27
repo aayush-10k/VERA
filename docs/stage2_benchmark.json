@@ -1,0 +1,52 @@
+{
+  "encoder": "tfidf",
+  "seed": 7,
+  "s1": {
+    "snapshots": [
+      {
+        "ref": "v1",
+        "records": 200,
+        "new": 200,
+        "unchanged": 0
+      },
+      {
+        "ref": "v2",
+        "records": 200,
+        "new": 199,
+        "unchanged": 1
+      },
+      {
+        "ref": "v3",
+        "records": 200,
+        "new": 0,
+        "unchanged": 200
+      }
+    ],
+    "distinct_snippets_embedded": 399,
+    "snippet_versions_total": 600,
+    "incremental_embed_s": 0.31,
+    "full_reembed_s": 0.45,
+    "speedup": 1.43,
+    "repo_history": {
+      "files": 200,
+      "commits": 20,
+      "snippets_embedded_incremental": 240,
+      "snippets_embedded_full": 4000,
+      "incremental_s": 0.08,
+      "full_reembed_s": 1.06,
+      "speedup": 13.17
+    }
+  },
+  "s2_s3": {
+    "n": 200,
+    "both_pass": 56,
+    "v3_certified_unchanged": 200,
+    "v1_v2_fingerprint_differs": 161,
+    "v1_v2_differs_on_both_pass": 19,
+    "working_first": 154,
+    "working_first_both_pass": 11,
+    "dense_only_working_first": 119,
+    "dense_only_working_first_both_pass": 34,
+    "wall_s": 53.7
+  }
+}

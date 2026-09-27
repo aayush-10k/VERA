@@ -65,6 +65,7 @@ class ExecutionResult:
     harness_mode: str  # 'script', 'call', 'none'
     matched: bool
     error_message: Optional[str] = None
+    trace_values: Optional[List[str]] = None  # int/str locals seen during the run (trace mode only)
 
 
 @dataclass
@@ -339,6 +340,33 @@ def _run_call_mode(g: Dict[str, Any], entry: Dict[str, Any], stdin_text: str) ->
     sys.stdout.write("\n")
 
 
+_TRACE_MAX_VALUES = 4000
+
+
+def _make_value_tracer(sink: set):
+    """sys.settrace hook collecting int/str local values on 'line'/'return' events (bounded)."""
+    def tracer(frame, event, arg):
+        if frame.f_code.co_filename != "solution.py":
+            return None
+        if event in ("line", "return"):
+            for v in frame.f_locals.values():
+                if isinstance(v, bool):
+                    continue
+                if isinstance(v, int) and abs(v) < 10**15:
+                    sink.add(str(v))
+                elif isinstance(v, str) and 0 < len(v) <= 64:
+                    sink.add(v)
+                elif isinstance(v, (list, tuple)) and len(v) <= 64:
+                    for x in v:
+                        if isinstance(x, int) and not isinstance(x, bool) and abs(x) < 10**15:
+                            sink.add(str(x))
+            if len(sink) > _TRACE_MAX_VALUES:
+                sys.settrace(None)
+                return None
+        return tracer
+    return tracer
+
+
 def _child_main(
     code: str,
     stdin_text: str,
@@ -347,13 +375,16 @@ def _child_main(
     mem_mb: int,
     cpu_seconds: int,
     call_entry: Optional[Dict[str, Any]],
+    trace_values: bool = False,
 ) -> None:  # pragma: no cover - runs in forked child
     """Never returns: ends with os._exit()."""
     import builtins
+    import json as _json
     import resource
 
     stdin_path, stdout_path, stderr_path = paths
     exit_code = 0
+    trace_sink: set = set()
     try:
         os.chdir(cwd)
         mem_bytes = mem_mb << 20
@@ -431,6 +462,8 @@ def _child_main(
 
         warnings.simplefilter("ignore")
         compiled = compile(code, "solution.py", "exec")
+        if trace_values:
+            sys.settrace(_make_value_tracer(trace_sink))
         try:
             exec(compiled, g)
         except SystemExit as se:  # exit()/quit() after printing is normal in CP code
@@ -438,6 +471,13 @@ def _child_main(
                 exit_code = 3
                 sys.stderr.write(f"\n{_EXC_MARKER}SystemExit: {se.code}\n")
 
+        if trace_values:
+            sys.settrace(None)
+            try:
+                with open(os.path.join(cwd, "trace.json"), "w", encoding="utf-8") as tf:
+                    tf.write(_json.dumps(sorted(trace_sink)))
+            except Exception:
+                pass
         # Wait for non-daemon threads the solution may have started (threading.Thread(target=main).start()).
         main_thread = threading.main_thread()
         for t in threading.enumerate():
@@ -490,6 +530,7 @@ def run_isolated(
     mem_mb: int = _DEFAULT_MEM_MB,
     call_entry: Optional[Dict[str, Any]] = None,
     workdir: Optional[str] = None,
+    trace_values: bool = False,
 ) -> Dict[str, Any]:
     """Fork the current process and execute ``code`` in the child under a wall-clock timeout.
 
@@ -511,7 +552,8 @@ def run_isolated(
     if pid == 0:  # child
         os.close(r_fd)
         # w_fd is inherited and closes automatically when the child exits -> parent sees EOF.
-        _child_main(code, stdin_text, (stdin_path, stdout_path, stderr_path), tmp, mem_mb, cpu_seconds, call_entry)
+        _child_main(code, stdin_text, (stdin_path, stdout_path, stderr_path), tmp, mem_mb, cpu_seconds, call_entry,
+                    trace_values=trace_values)
         os._exit(1)  # unreachable
 
     os.close(w_fd)
@@ -531,6 +573,15 @@ def run_isolated(
 
     stdout = _read_capped(stdout_path)
     stderr = _read_capped(stderr_path)
+    traced: Optional[List[str]] = None
+    if trace_values:
+        try:
+            import json as _json
+
+            with open(os.path.join(tmp, "trace.json"), "r", encoding="utf-8") as tf:
+                traced = _json.loads(tf.read())
+        except Exception:
+            traced = []
     shutil.rmtree(tmp, ignore_errors=True)
 
     mode = "call" if "VERA_MODE:call" in stderr else "script"
@@ -559,6 +610,7 @@ def run_isolated(
         "runtime_ms": runtime_ms,
         "mode": mode if stdout.strip() else "none",
         "error": error,
+        "trace_values": traced,
     }
 
 
@@ -791,6 +843,7 @@ class VerificationSandbox:
         force_timeout: Optional[float] = None,
         call_entry: Optional[Dict[str, Any]] = None,
         multiline_set: bool = False,
+        trace_values: bool = False,
     ) -> ExecutionResult:
         """Run candidate code once through the dual harness and compare with ``expected_output``."""
         code_key = self.timeout_tracker.get_key(code)
@@ -816,6 +869,7 @@ class VerificationSandbox:
             "timeout": float(timeout),
             "mem_mb": self.mem_limit_mb,
             "call_entry": call_entry,
+            "trace_values": trace_values,
         })
 
         if raw["status"] == "timeout":
@@ -836,6 +890,7 @@ class VerificationSandbox:
             harness_mode=raw["mode"],
             matched=matched,
             error_message=raw["error"],
+            trace_values=raw.get("trace_values"),
         )
 
     # ----- candidate over all examples ------------------------------------- #

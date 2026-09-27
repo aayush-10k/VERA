@@ -153,3 +153,45 @@ class TopKVerifier:
         if return_verification:
             return blended, qv
         return blended
+
+
+class GatedVerifier(TopKVerifier):
+    """R3: always verify the dense top ``base_k``; for *uncertain* queries (dense top-1/top-2 margin below
+    ``tau``) extend verification to dense ranks ``base_k..extend_k`` filtered by the static signature gate.
+
+    ``gate`` is a :class:`vera.gate.router.SignatureGate` (or None to skip the layout filter).
+    """
+
+    def __init__(self, base_k: int = 150, extend_k: int = 1000, tau: float = 0.02, gate: Any = None, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.base_k = base_k
+        self.extend_k = extend_k
+        self.tau = tau
+        self.gate = gate
+        self.stats = {"queries": 0, "extended": 0, "extra_candidates": 0}
+
+    def candidate_ids(self, query_text: str, ordered: List[Tuple[str, float]]) -> List[str]:
+        ids = [d for d, _ in ordered[: self.base_k]]
+        margin = ordered[0][1] - ordered[1][1] if len(ordered) > 1 else float("inf")
+        self.stats["queries"] += 1
+        if margin < self.tau and len(ordered) > self.base_k:
+            tail = [d for d, _ in ordered[self.base_k: self.extend_k]]
+            if self.gate is not None:
+                examples = self.parser.parse_examples(query_text)
+                if examples:
+                    allowed = set(self.gate.candidates(examples[0].stdin))
+                    tail = [d for d in tail if d in allowed]
+            ids.extend(tail)
+            self.stats["extended"] += 1
+            self.stats["extra_candidates"] += len(tail)
+        return ids
+
+    def rerank_query(self, query_text, dense_scores, corpus_dict, top_k=150, alpha=None, return_verification=False):
+        effective_alpha = self.alpha if alpha is None else alpha
+        ordered = sorted(dense_scores.items(), key=lambda kv: kv[1], reverse=True)
+        ids = self.candidate_ids(query_text, ordered)
+        qv = self.verify_query(query_text, ids, corpus_dict)
+        blended = self.blend(dense_scores, qv, effective_alpha, top_k=len(ordered))  # conf is 0 for unverified docs
+        if return_verification:
+            return blended, qv
+        return blended

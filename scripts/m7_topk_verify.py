@@ -91,6 +91,11 @@ def main():
             if (i + 1) % 50 == 0:
                 print(f"  {i + 1}/{len(dev_qids)} ({time.time() - t0:.0f}s)", flush=True)
         verify_s = time.time() - t0
+        # cache the alpha-independent verification so R3/R4 scripts can reuse it without re-running code
+        verif_cache = chassis.cache_dir / f"dev_r2_verification_{args.model.split('/')[-1]}_k{args.top_k}.json"
+        verif_cache.write_text(json.dumps({q: {"n_examples": qv.n_examples, "conf": qv.conf, "passed": qv.passed,
+                                               "m_first": qv.m_first, "n_all_pass": qv.n_all_pass} for q, qv in qvs.items()}))
+        print(f"[M7] cached dev verification -> {verif_cache}", flush=True)
 
         base_metrics = compute_retrieval_metrics(dev_qrels, dev_dense)
         gold_rank_dense = rank_of_gold(dev_qrels, dev_dense)
