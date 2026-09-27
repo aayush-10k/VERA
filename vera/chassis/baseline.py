@@ -132,6 +132,9 @@ class DenseChassis:
                     emb = np.load(candidate)
                     print(f"[Dense Chassis] Loaded cached {tag} embeddings {emb.shape} from {candidate.name}")
                     if not in_sorted_order:
+                        # legacy given-order file: migrate it to the order-independent key so any order hits next time
+                        if not path.exists():
+                            np.save(path, emb[order])
                         return emb
                     out = np.empty_like(emb)
                     out[order] = emb

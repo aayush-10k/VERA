@@ -127,6 +127,7 @@ def main():
             },
         }
         DEV_R2_JSON.write_text(json.dumps(dev_report, indent=2))
+        (DOCS_DIR / "dev_r0.json").write_text(json.dumps({"rung": "R0", "model": args.model, "dev": base_metrics}, indent=2))
         print(f"[M7] dev R0 NDCG@10={base_metrics['ndcg_at_10']:.4f} -> R2 NDCG@10={sweep[selected_alpha]['ndcg_at_10']:.4f} "
               f"at alpha={selected_alpha} (best {best_alpha}); gold in top-{args.top_k}: {n_gold_in_topk}/{len(dev_qids)}, "
               f"gold passes: {n_gold_pass}; -> {DEV_R2_JSON}")
