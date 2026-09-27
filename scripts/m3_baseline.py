@@ -70,21 +70,29 @@ def main():
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--promote", action="store_true", help="also overwrite appsretrieval_results.json")
     ap.add_argument("--no-dev", action="store_true")
+    ap.add_argument("--raw-corpus", action="store_true", help="ablation R0b: embed the raw corpus (no boilerplate stripping)")
+    ap.add_argument("--no-query-examples", action="store_true", help="ablation: drop the worked-example section from the embedded query")
     args = ap.parse_args()
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
     chassis = DenseChassis(model_name=args.model, backend=args.backend, max_seq_length=args.max_seq_length, batch_size=args.batch_size)
     short = args.model.split("/")[-1]
     name = f"vera/VERA-R0-{short}" if args.backend == "st" else "vera/VERA-REF-tfidf"
-    model = VERASearchProtocol(chassis=chassis, name=name)
+    model = VERASearchProtocol(chassis=chassis, name=name, remove_examples_from_query=args.no_query_examples)
+    if args.raw_corpus:
+        model.preprocessor.process_corpus = lambda corpus: {**corpus}  # type: ignore[method-assign]
+        name += "-rawcorpus"
+        model.name = name
 
-    out = ARTIFACTS_DIR / ("m3_r0_results.json" if args.backend == "st" else "ref_tfidf_results.json")
+    suffix = ("_raw" if args.raw_corpus else "") + ("_noqex" if args.no_query_examples else "")
+    out = ARTIFACTS_DIR / (f"m3_r0{suffix}_results.json" if args.backend == "st" else "ref_tfidf_results.json")
     print("=" * 66)
     print(f" VERA M3 — R0 baseline ({name}) via mteb.evaluate")
     print("=" * 66)
-    data = evaluate_with_mteb(model, out, extra={"rung": "R0" if args.backend == "st" else "REF", "backend": args.backend,
+    data = evaluate_with_mteb(model, out, extra={"rung": ("R0b" if suffix else "R0") if args.backend == "st" else "REF", "backend": args.backend,
                                                   "model": args.model, "max_seq_length": args.max_seq_length,
-                                                  "corpus_preprocessing": "strip_corpus_boilerplate", "verification": None})
+                                                  "corpus_preprocessing": "raw" if args.raw_corpus else "strip_corpus_boilerplate",
+                                                  "query_examples_embedded": not args.no_query_examples, "verification": None})
     row = data["scores"]["test"][0]
     print(f"\n TEST  NDCG@10={row['ndcg_at_10']:.4f}  MRR@10={row['mrr_at_10']:.4f}  R@10={row['recall_at_10']:.4f}  R@100={row['recall_at_100']:.4f}  R@150≈R@100..1000")
 
@@ -97,7 +105,7 @@ def main():
         dev_path.write_text(json.dumps({"rung": data["vera_run"]["rung"], "model": args.model, "dev": dm}, indent=2))
         print(f" DEV   NDCG@10={dm['ndcg_at_10']:.4f}  MRR@10={dm['mrr_at_10']:.4f}  R@100={dm['recall_at_100']:.4f}  -> {dev_path}")
 
-    if args.promote and args.backend == "st":
+    if args.promote and args.backend == "st" and not suffix:
         save_mteb_task_result(data, OFFICIAL_SUBMISSION_JSON)
     print(f" artifact: {out}")
 

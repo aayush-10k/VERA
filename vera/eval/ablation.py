@@ -21,7 +21,8 @@ DOCS = PROJECT_ROOT / "docs"
 ROWS: List[Tuple[str, str, Optional[str], str]] = [
     ("REF  lexical TF-IDF (word+bigram)", "ref_tfidf_results.json", "dev_ref_tfidf.json", "reference only, never submitted"),
     ("R0   gte-modernbert-base, 8192 ctx, stripped corpus", "m3_r0_results.json", "dev_r0.json", "dense chassis, zero-shot"),
-    ("R0b  R0 with raw (unstripped) corpus", "m3_r0_raw_results.json", "dev_r0_raw.json", "preprocessing ablation"),
+    ("R0b  R0 with raw (unstripped) corpus", "m3_r0_raw_results.json", None, "preprocessing ablation"),
+    ("R0c  R0 with the example section dropped from the embedded query", "m3_r0_noqex_results.json", None, "query ablation"),
     ("R1   R0 + LoRA fine-tune", "m5_r1_results.json", "dev_r1.json", "requires GPU session"),
     ("R2   R0/R1 + top-150 verification, rarity boost", "m7_r2_results.json", "dev_r2.json", "alpha fit on dev"),
     ("R3   R2 + corpus-wide verification behind gate", "m8_r3_results.json", "dev_r3.json", "router tau fit on dev"),
