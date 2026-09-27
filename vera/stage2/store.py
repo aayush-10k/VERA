@@ -58,7 +58,11 @@ def normalize_code(code: str) -> Tuple[str, str]:
     """Return (normalized_text, method). method is 'ast' or 'text' (unparseable code)."""
     src = code.replace("\r\n", "\n").replace("\r", "\n")
     try:
-        tree = ast.parse(src)
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(src)
         tree = _DocstringStripper().visit(tree)
         return ast.dump(tree, annotate_fields=True, include_attributes=False), "ast"
     except SyntaxError:

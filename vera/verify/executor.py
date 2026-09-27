@@ -201,7 +201,11 @@ def _get_2to3_tool(refactor):  # pragma: no cover - environment dependent
 def detect_call_entry(code: str) -> Optional[Dict[str, Any]]:
     """Find a Mode-B entrypoint: LeetCode ``class Solution`` method or a top-level solve()/main()."""
     try:
-        tree = ast.parse(code)
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(code)
     except SyntaxError:
         return None
 
