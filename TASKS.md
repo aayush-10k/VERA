@@ -526,9 +526,9 @@ flowchart TD
 - [x] **Task 06**: Sandbox rebuilt as process-isolated fork-per-run workers (real `SIGKILL` timeouts, rlimits, temp CWD, dual harness, py2/`return`-outside-function rescue), ~4–6 ms dispatch; normalized comparator incl. Python-literal equality; `tests/test_executor.py` green
 - [x] **Task 07**: Gold-run re-measured with the fixed parser+sandbox: 87.2% pass given a parseable example; projected 86.7% on the test format mix → gate = `CORPUS_WIDE_UNLOCKED` (`docs/goldrun.md`)
 - [ ] **Task 08**: R2 top-K boost — implementation done (`vera/verify/boost.py`, `scripts/m7_topk_verify.py`); α fit on dev and test JSON **pending the R0 embeddings**
-- [ ] **Task 09**: Uncertainty router & signature gate evaluated (Rung R3 — unlocked by the M4 gate, not yet built)
-- [ ] **Task 10**: QB-Norm demotion active, `docs/ablations.md` generated, final R4 JSON emitted
-- [ ] **Task 11**: AST version store and Git/snapshot ingestion benchmarked ($>10\times$ speedup)
-- [ ] **Task 12**: Behavior fingerprinting and diff-line ranker pass synthetic benchmark
-- [ ] **Task 13**: Gradio UI operational with live badges and standing-questions watcher
-- [ ] **Task 14**: Clean CPU clone rehearsal passes; all 5 submission artifacts validated
+- [ ] **Task 09**: R3 — `GatedVerifier` + uncertainty router + signature gate implemented (`vera/gate/router.py`, `scripts/m8_corpus_gate.py`); dev evaluation vs R2 **pending the embeddings**
+- [ ] **Task 10**: R4 — QB-Norm hubness demotion implemented (`vera/chassis/qbnorm.py`, `scripts/m9_qbnorm.py`, dev-bank exclusion); ablation generator (`vera/eval/ablation.py`); dev fit and final JSON **pending**
+- [x] **Task 11**: Content-addressed version store (normalized-AST ids) + git/folder ingestion; measured on the synthetic 200-file × 20-commit history: **13.2× faster** incremental rebuild than full re-embed (`docs/stage2-benchmark.md`)
+- [x] **Task 12**: Behaviour fingerprints (example-mutated probe battery) and version ranker measured on 200 synthetic v1→v2→v3 histories (half regressions): refactor certified unchanged 98.5%; working-version-first **89.5%** overall / **66.1%** on the both-pass subset vs dense-only 51.5% / 55.9% (`docs/stage2-benchmark.md`). Not yet re-run with the gte encoder.
+- [ ] **Task 13**: Gradio page built (`vera/demo/app.py`, `scripts/run_demo.py`: retrieve+verify badges, version lineage, standing questions on ingest); backend exercised headlessly, UI not yet rehearsed
+- [ ] **Task 14**: Clean CPU clone rehearsal, release tag, PPT, video — not started

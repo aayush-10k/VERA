@@ -113,21 +113,36 @@ class DenseChassis:
         return np.asarray(emb, dtype=np.float32)
 
     def encode_cached(self, texts: Sequence[str], tag: str, force: bool = False) -> np.ndarray:
-        """Encode with an on-disk cache keyed by model + texts."""
-        fp = _fingerprint(self.tag, str(len(texts)), *texts)
-        path = self.cache_dir / f"{self.tag}_{fp}.npy"
+        """Encode with an on-disk cache keyed by model + the *set* of texts (order-independent).
+
+        The cache stores embeddings in sorted-text order, so the same texts presented in any order
+        (e.g. by ``mteb`` vs. the parquet loader) hit the same file. Files written by earlier versions,
+        fingerprinted in the given order, are still recognised.
+        """
+        texts = list(texts)
+        order = sorted(range(len(texts)), key=lambda i: texts[i])
+        sorted_texts = [texts[i] for i in order]
+        fp_sorted = _fingerprint(self.tag, str(len(texts)), *sorted_texts)
+        fp_given = _fingerprint(self.tag, str(len(texts)), *texts)
+        path = self.cache_dir / f"{self.tag}_{fp_sorted}.npy"
         if not force:
-            # The fingerprint covers model + texts, so any file with this fingerprint is valid whatever its prefix.
-            hits = [path] if path.exists() else sorted(self.cache_dir.glob(f"*{self.tag}_{fp}.npy"))
-            if hits:
-                emb = np.load(hits[0])
-                print(f"[Dense Chassis] Loaded cached {tag} embeddings {emb.shape} from {hits[0].name}")
-                return emb
-        emb = self.encode(texts, desc=tag)
+            for candidate, in_sorted_order in ((path, True), *[(p, True) for p in sorted(self.cache_dir.glob(f"*{self.tag}_{fp_sorted}.npy"))],
+                                               *[(p, False) for p in sorted(self.cache_dir.glob(f"*{self.tag}_{fp_given}.npy"))]):
+                if candidate.exists():
+                    emb = np.load(candidate)
+                    print(f"[Dense Chassis] Loaded cached {tag} embeddings {emb.shape} from {candidate.name}")
+                    if not in_sorted_order:
+                        return emb
+                    out = np.empty_like(emb)
+                    out[order] = emb
+                    return out
+        emb_sorted = self.encode(sorted_texts, desc=tag)
         if self.backend == "st":
-            np.save(path, emb)
+            np.save(path, emb_sorted)
             print(f"[Dense Chassis] Cached {tag} embeddings -> {path.name}")
-        return emb
+        out = np.empty_like(emb_sorted)
+        out[order] = emb_sorted
+        return out
 
     # ------------------------------------------------------------------ #
     def index_corpus(self, corpus: Dict[str, str], force_recompute: bool = False) -> None:
