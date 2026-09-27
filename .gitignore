@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments & Virtualenv
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Temporary / Scratch logs
+output.txt
+*.log
+
+# Caches & Embeddings
+vera/data/cache/
+vera/chassis/cache/
+*.npz
+*.npy
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

@@ -1,0 +1,28 @@
+# VERA Environment Dependencies
+# Pinned for CPU inference reproducibility in Samsung PRISM Hackathon Theme 1
+
+# Core Benchmark & Evaluation
+mteb>=2.0.0
+datasets>=2.18.0
+pytrec_eval_terrier>=0.5.9
+
+# Dense Retrieval & Embedding Models
+sentence-transformers>=3.0.0
+transformers>=4.40.0
+torch>=2.2.0
+onnxruntime>=1.17.0
+peft>=0.10.0
+
+# Numerical, Data Processing & Verification Sandbox
+numpy>=1.24.0,<2.0.0
+pandas>=2.0.0
+scipy>=1.12.0
+scikit-learn>=1.4.0
+psutil>=5.9.0
+
+# Demo Interface & Utilities
+gradio>=4.20.0
+rich>=13.7.0
+tqdm>=4.66.0
+pytest>=8.0.0
+python-dotenv>=1.0.0
