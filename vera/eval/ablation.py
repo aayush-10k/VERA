@@ -50,7 +50,7 @@ def _test_row(data: Dict[str, Any]) -> Dict[str, Any]:
 def _dev_ndcg(dev: Optional[Dict[str, Any]]) -> Optional[float]:
     if not dev:
         return None
-    for key in ("dev_r2", "dev_r3", "dev_r4", "dev_r1", "dev"):
+    for key in ("dev_r4", "dev_r3", "dev_r2", "dev_r1", "dev"):  # most specific first: dev_rN.json also carries the R2 reference
         if key in dev and isinstance(dev[key], dict) and "ndcg_at_10" in dev[key]:
             return dev[key]["ndcg_at_10"]
     return None
