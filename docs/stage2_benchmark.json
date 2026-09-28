@@ -1,0 +1,49 @@
+{
+  "encoder": "gte-modernbert-base",
+  "seed": 7,
+  "s1": {
+    "snapshots": [
+      {
+        "ref": "v1",
+        "records": 200,
+        "new": 200,
+        "unchanged": 0
+      },
+      {
+        "ref": "v2",
+        "records": 200,
+        "new": 91,
+        "unchanged": 109
+      },
+      {
+        "ref": "v3",
+        "records": 200,
+        "new": 108,
+        "unchanged": 92
+      }
+    ],
+    "distinct_snippets_embedded": 399,
+    "snippet_versions_total": 600,
+    "incremental_embed_s": 503.55,
+    "full_reembed_s": 499.3,
+    "speedup": 0.99,
+    "repo_history": null
+  },
+  "s2_s3": {
+    "n": 200,
+    "both_pass": 59,
+    "regression_chains": 109,
+    "refactor_certified_unchanged": 200,
+    "bug_fingerprint_differs": 160,
+    "bug_differs_on_both_pass": 21,
+    "working_first": 191,
+    "working_first_both_pass": 51,
+    "no_consensus_working_first": 186,
+    "no_consensus_working_first_both_pass": 46,
+    "dense_only_working_first": 160,
+    "dense_only_working_first_both_pass": 46,
+    "recency_working_first": 91,
+    "recency_working_first_both_pass": 27,
+    "wall_s": 3336.1
+  }
+}

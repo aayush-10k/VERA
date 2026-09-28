@@ -24,6 +24,40 @@ class ComparisonResult:
     tokens_expected: int
 
 
+_NO_LITERAL = object()
+_JSON_WORDS = {"true": "True", "false": "False", "null": "None"}
+
+
+def _try_literal(text: str):
+    """Parse a single Python/JSON literal (list, tuple, dict, str, number, bool). Returns _NO_LITERAL on failure."""
+    import ast
+    import re as _re
+
+    t = text.strip()
+    if not t or len(t) > 20000:
+        return _NO_LITERAL
+    # Only attempt for things that look like structured literals or quoted strings / json words.
+    if not (t[0] in "[({\"'" or t.lower() in _JSON_WORDS or t.lower() in ("true", "false")):
+        return _NO_LITERAL
+    fixed = _re.sub(r"\b(true|false|null)\b", lambda m: _JSON_WORDS[m.group(1)], t)
+    try:
+        return ast.literal_eval(fixed)
+    except Exception:
+        return _NO_LITERAL
+
+
+def _literals_equal(a, b, float_tol: float) -> bool:
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(a - b) <= float_tol * max(1.0, abs(b))
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_literals_equal(x, y, float_tol) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_literals_equal(a[k], b[k], float_tol) for k in a)
+    return a == b
+
+
 def _is_float(token: str) -> bool:
     try:
         val = float(token)
@@ -100,6 +134,13 @@ def evaluate_comparison(
     if actual_str == expected_str:
         tokens = len(actual_str.split())
         return ComparisonResult(matched=True, reason="exact_match", tokens_actual=tokens, tokens_expected=tokens)
+
+    # Python/JSON literal equality: "[0,1]" == "[0, 1]", '"abc"' == "'abc'", "true" == "True"
+    lit_a = _try_literal(actual_str)
+    lit_e = _try_literal(expected_str)
+    if lit_a is not _NO_LITERAL and lit_e is not _NO_LITERAL and _literals_equal(lit_a, lit_e, float_tol):
+        tokens = len(actual_str.split())
+        return ComparisonResult(matched=True, reason="literal_match", tokens_actual=tokens, tokens_expected=len(expected_str.split()))
 
     # Empty match
     if not actual_str and not expected_str:

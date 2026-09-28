@@ -21,47 +21,36 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from vera.data.loader import AppsRetrievalDataset
+from vera.verify.parser import WorkedExampleParser
 
 DOCS_DIR = PROJECT_ROOT / "docs"
 AUDIT_DOC = DOCS_DIR / "dataset-audit.md"
 
 
-def analyze_worked_examples(queries: Dict[str, str]) -> Dict[str, int]:
-    """Analyzes the presence of worked examples in query statements."""
-    stats = {
-        "total_queries": len(queries),
-        "has_example_keyword": 0,
-        "has_sample_io": 0,
-        "has_code_fence": 0,
-        "parseable_worked_example": 0,
-        "no_example_found": 0,
-    }
-
-    # Common section markers in APPS problem statements
-    p_example = re.compile(r"(?i)\bexamples?\b")
-    p_sample_io = re.compile(r"(?i)\b(?:sample\s+input|sample\s+output|input\s*:\s*\n|output\s*:\s*\n)")
-    p_fence = re.compile(r"```")
-    p_io_pair = re.compile(r"(?i)(?:input|sample\s+input).*?(?:output|sample\s+output)", re.DOTALL)
-
-    for qid, text in queries.items():
-        has_ex = bool(p_example.search(text))
-        has_sio = bool(p_sample_io.search(text))
-        has_f = bool(p_fence.search(text))
-        has_pair = bool(p_io_pair.search(text))
-
-        if has_ex:
-            stats["has_example_keyword"] += 1
-        if has_sio:
-            stats["has_sample_io"] += 1
-        if has_f:
-            stats["has_code_fence"] += 1
-
-        if has_pair or (has_ex and (has_sio or has_f)):
-            stats["parseable_worked_example"] += 1
+def analyze_worked_examples(queries: Dict[str, str]) -> Dict[str, object]:
+    """Runs the real worked-example parser over the statements: coverage, format mix, failure reasons."""
+    parser = WorkedExampleParser()
+    formats: Dict[str, int] = {}
+    reasons: Dict[str, int] = {}
+    n_examples_hist: Dict[int, int] = {}
+    parsed = 0
+    for text in queries.values():
+        rep = parser.parse_report(text)
+        if rep.examples:
+            parsed += 1
+            formats[rep.source_format] = formats.get(rep.source_format, 0) + 1
+            k = min(len(rep.examples), 5)
+            n_examples_hist[k] = n_examples_hist.get(k, 0) + 1
         else:
-            stats["no_example_found"] += 1
-
-    return stats
+            reasons[rep.reason] = reasons.get(rep.reason, 0) + 1
+    return {
+        "total_queries": len(queries),
+        "parseable_worked_example": parsed,
+        "no_example_found": len(queries) - parsed,
+        "formats": formats,
+        "reasons": reasons,
+        "n_examples_hist": n_examples_hist,
+    }
 
 
 def check_id_alignment(test_qrels: Dict[str, Dict[str, int]]) -> Dict[str, int]:
@@ -102,9 +91,25 @@ def generate_audit_report(ds: AppsRetrievalDataset) -> str:
     gold_counts = [len(docs) for docs in test_qrels.values()]
     avg_gold = sum(gold_counts) / len(gold_counts) if gold_counts else 0
 
-    # 2. Worked example coverage
+    # 2. Worked example coverage (real parser), test and train partitions
     ex_stats = analyze_worked_examples(test_queries)
     parse_pct = (ex_stats["parseable_worked_example"] / total_test_q) * 100
+    train_queries = {q: ds.queries_dict[q] for q in train_qrels if q in ds.queries_dict}
+    tr_stats = analyze_worked_examples(train_queries)
+    tr_parse_pct = (tr_stats["parseable_worked_example"] / max(1, len(train_queries))) * 100
+    fmt_label = {"codeforces": "Codeforces `-----Examples-----` / `Input` / `Output`",
+                 "dashed_sample": "AtCoder/CodeChef `-----Sample Input-----` / `-----Sample Output-----`",
+                 "leetcode": "LeetCode `Example N:` / `Input:` / `Output:`",
+                 "bare_markers": "Bare `Sample Input` / `Sample Output` lines"}
+    fmt_rows = "\n".join(
+        f"| {fmt_label.get(f, f)} | {ex_stats['formats'].get(f, 0)} ({100 * ex_stats['formats'].get(f, 0) / total_test_q:.1f}%) | "
+        f"{tr_stats['formats'].get(f, 0)} ({100 * tr_stats['formats'].get(f, 0) / max(1, len(train_queries)):.1f}%) |"
+        for f in ["codeforces", "dashed_sample", "leetcode", "bare_markers"]
+    )
+    fmt_rows += (f"\n| no parseable example | {ex_stats['no_example_found']} ({100 * ex_stats['no_example_found'] / total_test_q:.1f}%) | "
+                 f"{tr_stats['no_example_found']} ({100 * tr_stats['no_example_found'] / max(1, len(train_queries)):.1f}%) |")
+    reason_rows = ", ".join(f"{k}: {v}" for k, v in sorted(ex_stats["reasons"].items(), key=lambda kv: -kv[1]))
+    hist_rows = ", ".join(f"{k}{'+' if k == 5 else ''} examples: {v}" for k, v in sorted(ex_stats["n_examples_hist"].items()))
 
     # 3. Alignment check
     align_stats = check_id_alignment(test_qrels)
@@ -133,7 +138,8 @@ This audit confirms the integrity and structural characteristics of the official
 | **Gold Docs per Query** | Exactly 1 (binary) | **{avg_gold:.1f}** (min={min(gold_counts)}, max={max(gold_counts)}) | **VERIFIED** |
 | **Dev Split Held-Out** | 500 fixed pairs | **{len(split_info['dev_query_ids'])}** (seed={split_info['metadata']['seed']}) | **VERIFIED** |
 | **Train Split Remaining** | 4,500 pairs | **{len(split_info['train_query_ids'])}** | **VERIFIED** |
-| **Parseable Example Rate** | ~78% claimed | **{parse_pct:.2f}%** ({ex_stats['parseable_worked_example']}/{total_test_q}) | **VERIFIED** |
+| **Parseable Example Rate (test)** | ~78% claimed by CtrlFind | **{parse_pct:.2f}%** ({ex_stats['parseable_worked_example']}/{total_test_q}) | **MEASURED** (real parser, `vera/verify/parser.py`) |
+| **Parseable Example Rate (train partition)** | — | **{tr_parse_pct:.2f}%** ({tr_stats['parseable_worked_example']}/{len(train_queries)}) | **MEASURED** — train ≠ test distribution |
 
 ---
 
@@ -148,25 +154,35 @@ This audit confirms the integrity and structural characteristics of the official
   > **Zero Metadata Usage**: Under no circumstances does any scoring function, encoder, or re-ranker read document IDs (`_id`, `corpus-id`), query IDs (`query-id`), or dataset partition tags during search. All similarity and verification boosts operate strictly on raw text content (`problem_statement_text` and `solution_code_text`).
 
 ### Train/Test Partition Separation
-- Total corpus documents in collection: **8,765**.
-- The 5,000 train-partition solutions are part of the retrieval corpus.
+- Total corpus documents in collection: **8,765** = 5,000 train-partition golds + 3,765 test golds; every corpus
+  document is the gold of exactly one query, and the two gold sets are disjoint.
+- The MTEB copy of the dataset (`CoIR-Retrieval/apps`) exposes a `partition` column ("train"/"test") and a
+  `meta_information` column (`starter_code`, source `url`) on **both** corpus and queries. `VERASearchProtocol`
+  reads only `id` and `text`; `partition`, `meta_information`, `title` and `language` are never accessed.
+- The 5,000 train-partition solutions act as distractors for test queries.
 - **Content-Based Demotion**: Rather than filtering by forbidden partition tags, VERA implements **QB-Norm** (`vera/chassis/qbnorm.py`) in Rung R4, using the 5,000 public training statements as a semantic querybank to demote over-represented training solutions purely through content similarity.
 
 ---
 
 ## 3. Worked-Example Parseability Analysis
 
-APPS problem statements include worked input/output examples that define the functional specification. VERA transforms these examples into executable test cases.
+APPS problem statements include worked input/output examples that define the functional specification. VERA
+transforms these examples into executable test cases with `WorkedExampleParser` (the numbers below are produced by
+that parser, not by keyword heuristics).
 
-- **Total Test Queries Analyzed**: {total_test_q}
-- **Queries containing explicit "Example" markers**: {ex_stats['has_example_keyword']} ({(ex_stats['has_example_keyword']/total_test_q)*100:.1f}%)
-- **Queries containing "Sample Input / Output"**: {ex_stats['has_sample_io']} ({(ex_stats['has_sample_io']/total_test_q)*100:.1f}%)
-- **Queries containing code fences (```)**: {ex_stats['has_code_fence']} ({(ex_stats['has_code_fence']/total_test_q)*100:.1f}%)
-- **Fully Parseable Input/Output Pairs**: **{ex_stats['parseable_worked_example']} ({parse_pct:.2f}%)**
-- **Unparseable / No Explicit Example**: {ex_stats['no_example_found']} ({(ex_stats['no_example_found']/total_test_q)*100:.1f}%)
+| Statement format | Test queries ({total_test_q}) | Train partition ({len(train_queries)}) |
+|---|---|---|
+{fmt_rows}
 
-**Implication for Verification Engine**:
-For ~{parse_pct:.0f}% of queries, VERA has high-confidence dynamic execution signals. For the remaining ~{(100-parse_pct):.0f}% of queries without parseable examples, VERA relies gracefully on the L1 Chassis dense score floor.
+- **Test queries with ≥1 executable example**: **{ex_stats['parseable_worked_example']} ({parse_pct:.2f}%)** — examples per statement: {hist_rows}
+- **Test queries without**: {ex_stats['no_example_found']} ({(ex_stats['no_example_found']/total_test_q)*100:.1f}%) — reasons: {reason_rows}
+- The `-----Input-----` / `-----Output-----` sections are *format specifications in prose*, never examples; the parser
+  ignores them. (An earlier keyword heuristic counted them and over-reported coverage.)
+
+**Implication for the verification engine**: for ~{parse_pct:.0f}% of test queries VERA has an executable oracle; the
+remaining ~{(100-parse_pct):.1f}% fall back to the dense score alone. The train partition is dominated by LeetCode /
+Codewars-style function problems (no stdin sample), so any gold-run or verification statistic measured on train must be
+re-weighted to the test format mix (see `docs/goldrun.md`).
 
 ---
 

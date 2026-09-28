@@ -1,11 +1,14 @@
 """
-VERA Milestone 7 Evaluation (Rung R2 — Top-K Verification Re-Ranking & Rarity Boost)
-==================================================================================
-1. Obtains dense candidate rankings from DenseChassis (top-150).
-2. Performs grid search on the 500-pair dev split to fit optimal alpha in [0.05, 0.40].
-3. Executes Top-K verification with calibrated rarity boost on test queries.
-4. Emits Milestone JSON #3: artifacts/m7_r2_results.json (Guaranteed Fallback Ship).
-5. Validates against official MTEB benchmark schema.
+VERA Milestone 7 — R2: top-K verification re-ranking with the calibrated rarity boost
+====================================================================================
+1. Dense candidates (top-150) for the 500 dev queries from the cached chassis embeddings.
+2. Verify every dev candidate once; grid-search alpha in [0.05, 0.40] (+ a wider tail)
+   on dev NDCG@10; record the dev ablation (R0 vs R2 at every alpha).
+3. Run the test split through ``mteb.evaluate`` with the selected alpha and emit
+   ``artifacts/m7_r2_results.json`` (milestone JSON #3); ``--promote`` copies it to
+   ``appsretrieval_results.json``.
+
+Only dev is used for fitting. The test split is touched once, at the end.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -23,249 +26,164 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from vera.chassis.baseline import DenseChassis
 from vera.chassis.preprocess import ChassisPreprocessor
 from vera.data.loader import AppsRetrievalDataset
+from vera.eval.metrics import compute_retrieval_metrics, rank_of_gold
+from vera.mtebio.search_protocol import VERASearchProtocol
 from vera.mtebio.serializer import save_mteb_task_result, validate_mteb_result_schema
 from vera.verify.boost import TopKVerifier
-from scripts.m2_harness_test import compute_retrieval_metrics
 
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
+DOCS_DIR = PROJECT_ROOT / "docs"
 R2_RESULTS_JSON = ARTIFACTS_DIR / "m7_r2_results.json"
 OFFICIAL_SUBMISSION_JSON = PROJECT_ROOT / "appsretrieval_results.json"
-DEV_SPLIT_FILE = PROJECT_ROOT / "vera" / "data" / "dev_split_ids.json"
+DEV_R2_JSON = DOCS_DIR / "dev_r2.json"
+
+ALPHA_GRID = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0]
 
 
-def calibrate_alpha_on_dev(
-    verifier: TopKVerifier,
-    dev_queries: Dict[str, str],
-    dev_dense_results: Dict[str, Dict[str, float]],
-    dev_qrels: Dict[str, Dict[str, int]],
-    raw_corpus: Dict[str, str],
-    top_k: int = 150,
-    candidate_alphas: Optional[List[float]] = None,
-) -> Tuple[float, Dict[float, float]]:
-    """Grid search across alpha candidates to find the optimal boost weight on the dev split."""
-    from collections import Counter
-    from vera.verify.boost import compute_rarity_confidence, min_max_normalize
-
-    if candidate_alphas is None:
-        candidate_alphas = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]
-
-    print(f"\n[M7 Calibration] Precomputing verification confidence for {len(dev_queries)} dev queries...", flush=True)
-    dev_precomputed = {}
-    for qid, q_text in dev_queries.items():
-        if qid not in dev_dense_results:
-            continue
-        dense_scores = dev_dense_results[qid]
-        sorted_candidates = sorted(dense_scores.items(), key=lambda kv: kv[1], reverse=True)
-        top_slice = sorted_candidates[:top_k]
-        top_candidate_ids = [doc_id for doc_id, _ in top_slice]
-
-        norm_dense = min_max_normalize(dense_scores)
-        examples = verifier.parser.parse_examples(q_text)
-
-        conf_map: Dict[str, float] = {}
-        if examples:
-            verification_results = {}
-            for doc_id in top_candidate_ids:
-                code = raw_corpus.get(doc_id, "")
-                verification_results[doc_id] = verifier.sandbox.verify_candidate(code, examples)
-
-            first_outputs = [
-                res.first_output for res in verification_results.values() if res.passed_examples > 0 and res.first_output
-            ]
-            output_counter = Counter(first_outputs)
-
-            for doc_id in top_candidate_ids:
-                res = verification_results[doc_id]
-                m = output_counter.get(res.first_output, 1)
-                conf_map[doc_id] = compute_rarity_confidence(
-                    passed_examples=res.passed_examples,
-                    total_examples=len(examples),
-                    identical_output_count=m,
-                )
-
-        dev_precomputed[qid] = {
-            "norm_dense": norm_dense,
-            "conf_map": conf_map,
-            "sorted_cands": sorted_candidates,
-        }
-
-    print(f"[M7 Calibration] Starting alpha grid search across {len(candidate_alphas)} values...", flush=True)
-    best_alpha = 0.20
-    best_ndcg = -1.0
-    alpha_scores: Dict[float, float] = {}
-
-    for alpha in candidate_alphas:
-        reranked_dev: Dict[str, Dict[str, float]] = {}
-        for qid, cache in dev_precomputed.items():
-            norm_dense = cache["norm_dense"]
-            conf_map = cache["conf_map"]
-            sorted_candidates = cache["sorted_cands"]
-
-            scores: Dict[str, float] = {}
-            for doc_id, _ in sorted_candidates[:top_k]:
-                scores[doc_id] = norm_dense.get(doc_id, 0.0) + alpha * conf_map.get(doc_id, 0.0)
-            for doc_id, _ in sorted_candidates[top_k:]:
-                scores[doc_id] = norm_dense.get(doc_id, 0.0)
-
-            reranked_dev[qid] = dict(sorted(scores.items(), key=lambda kv: kv[1], reverse=True))
-
-        metrics = compute_retrieval_metrics(dev_qrels, reranked_dev)
-        ndcg10 = metrics.get("ndcg_at_10", 0.0)
-        alpha_scores[alpha] = ndcg10
-        print(f"  alpha = {alpha:.2f} -> dev NDCG@10 = {ndcg10:.4f}", flush=True)
-
-        if ndcg10 > best_ndcg:
-            best_ndcg = ndcg10
-            best_alpha = alpha
-
-    print(f"[M7 Calibration] Optimal alpha* = {best_alpha:.2f} (dev NDCG@10: {best_ndcg:.4f})\n", flush=True)
-    return best_alpha, alpha_scores
-
-
-def run_r2_evaluation(
-    model_name: str = "Alibaba-NLP/gte-modernbert-base",
-    sample_size: Optional[int] = None,
-    top_k: int = 150,
-    alpha: Optional[float] = None,
-    run_grid_search: bool = True,
-    use_fallback: bool = True,
-) -> dict:
-    preprocessor = ChassisPreprocessor()
-    ds = AppsRetrievalDataset()
-
-    print("[M7 Verification] Loading dataset...", flush=True)
-    raw_corpus = ds.get_corpus()
-    test_queries = ds.get_test_queries()
-    test_qrels = ds.get_test_qrels()
-
-    clean_corpus = preprocessor.process_corpus(raw_corpus)
-
-    if sample_size and sample_size < len(test_queries):
-        sampled_qids = list(test_queries.keys())[:sample_size]
-        eval_queries = {qid: test_queries[qid] for qid in sampled_qids}
-        eval_qrels = {qid: test_qrels[qid] for qid in sampled_qids if qid in test_qrels}
-    else:
-        eval_queries = test_queries
-        eval_qrels = test_qrels
-
-    clean_queries = preprocessor.process_queries(eval_queries)
-
-    # Initialize Chassis
-    chassis = DenseChassis(model_name=model_name, use_fallback=use_fallback)
-    t_idx0 = time.time()
-    chassis.index_corpus(clean_corpus)
-    index_time = time.time() - t_idx0
-
-    print(f"[M7 Verification] Running dense retrieval for {len(clean_queries)} test queries...", flush=True)
-    t_search0 = time.time()
-    dense_results = chassis.search(clean_queries, top_k=top_k)
-    search_time = time.time() - t_search0
-
-    # Initialize verifier
-    verifier = TopKVerifier(default_alpha=0.20)
-
-    # Optional grid search on dev split if alpha is not fixed
-    selected_alpha = alpha
-    if selected_alpha is None and run_grid_search and DEV_SPLIT_FILE.exists():
-        with open(DEV_SPLIT_FILE, "r", encoding="utf-8") as f:
-            dev_split_data = json.load(f)
-        dev_qids = set(dev_split_data.get("dev_query_ids", [])[:100])  # Fast 100 dev queries
-        dev_queries = {qid: ds.queries_dict[qid] for qid in dev_qids if qid in ds.queries_dict}
-        dev_qrels = {qid: ds.train_qrels[qid] for qid in dev_qids if qid in ds.train_qrels}
-        clean_dev_queries = preprocessor.process_queries(dev_queries)
-        dev_dense_results = chassis.search(clean_dev_queries, top_k=top_k)
-        selected_alpha, _ = calibrate_alpha_on_dev(
-            verifier=verifier,
-            dev_queries=dev_queries,
-            dev_dense_results=dev_dense_results,
-            dev_qrels=dev_qrels,
-            raw_corpus=raw_corpus,
-            top_k=top_k,
-        )
-    elif selected_alpha is None:
-        selected_alpha = 0.20  # Calibrated default
-
-    print(f"[M7 Verification] Re-ranking {len(eval_queries)} test queries with alpha={selected_alpha:.2f}...", flush=True)
-    t_verify0 = time.time()
-    reranked_results: Dict[str, Dict[str, float]] = {}
-
-    for idx, (qid, q_text) in enumerate(eval_queries.items()):
-        cand_scores = dense_results.get(qid, {})
-        reranked_results[qid] = verifier.rerank_query(
-            query_text=q_text,
-            dense_scores=cand_scores,
-            corpus_dict=raw_corpus,
-            top_k=top_k,
-            alpha=selected_alpha,
-        )
-        if (idx + 1) % 10 == 0 or (idx + 1) == len(eval_queries):
-            print(f"  [{idx + 1}/{len(eval_queries)}] Query {qid} verified...", flush=True)
-
-    verification_time = time.time() - t_verify0
-    total_eval_time = search_time + verification_time
-
-    print("[M7 Verification] Computing official MTEB retrieval metrics...", flush=True)
-    metrics = compute_retrieval_metrics(eval_qrels, reranked_results)
-    metrics["evaluation_time"] = round(total_eval_time, 2)
-    metrics["index_time"] = round(index_time, 2)
-    metrics["verification_time"] = round(verification_time, 2)
-    metrics["total_queries"] = len(eval_queries)
-    metrics["calibrated_alpha"] = selected_alpha
-
-    result_dict = {
-        "dataset_revision": "CoIR-APPS-v1.0",
-        "mteb_dataset_name": "AppsRetrieval",
-        "mteb_version": "2.0.1",
-        "model_name": f"VERA-R2-TopKVerify-{model_name.split('/')[-1]}",
-        "evaluation_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "test": metrics,
-    }
-
-    return result_dict
+def dev_candidates(chassis: DenseChassis, ds: AppsRetrievalDataset, pre: ChassisPreprocessor, top_k: int):
+    """Dense results for the 500 dev queries, sliced out of the cached 5,000 train-query embeddings."""
+    split = ds.get_or_create_dev_split()
+    dev_qids = split["dev_query_ids"]
+    all_train = pre.process_queries({q: ds.queries_dict[q] for q in sorted(ds.train_qrels)})
+    qids, embs = chassis.encode_queries(all_train, tag="train_queries")
+    pos = {q: i for i, q in enumerate(qids)}
+    dev_embs = embs[[pos[q] for q in dev_qids]]
+    sims = chassis.similarity(dev_embs)
+    dense = chassis.topk_from_matrix(dev_qids, sims, top_k)
+    qrels = {q: ds.train_qrels[q] for q in dev_qids}
+    return dev_qids, dense, qrels
 
 
 def main():
-    parser = argparse.ArgumentParser(description="VERA R2 Top-K Verification Evaluation")
-    parser.add_argument("--model", type=str, default="Alibaba-NLP/gte-modernbert-base")
-    parser.add_argument("--sample", type=int, default=200, help="Number of test queries to sample (0 for all)")
-    parser.add_argument("--top_k", type=int, default=150, help="Number of dense candidates to verify")
-    parser.add_argument("--alpha", type=float, default=None, help="Fixed alpha weight (bypasses grid search)")
-    parser.add_argument("--all", action="store_true", help="Evaluate on all 3,765 test queries")
-    parser.add_argument("--no_grid", action="store_true", help="Skip dev grid search and use default alpha")
-    parser.add_argument("--online", action="store_true", help="Download online transformer weights")
-    args = parser.parse_args()
-
+    ap = argparse.ArgumentParser(description="VERA R2 top-K verification")
+    ap.add_argument("--model", default="Alibaba-NLP/gte-modernbert-base")
+    ap.add_argument("--top-k", type=int, default=150)
+    ap.add_argument("--alpha", type=float, default=None, help="fixed alpha (skips the dev grid search)")
+    ap.add_argument("--workers", type=int, default=None)
+    ap.add_argument("--timeout", type=float, default=0.75)
+    ap.add_argument("--dev-only", action="store_true")
+    ap.add_argument("--promote", action="store_true")
+    args = ap.parse_args()
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    sample_size = None if args.all or args.sample == 0 else args.sample
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("=" * 65)
-    print(" VERA Milestone 7: R2 Top-K Verification Re-Ranking Evaluation")
-    print("=" * 65)
+    ds = AppsRetrievalDataset()
+    pre = ChassisPreprocessor()
+    raw_corpus = ds.get_corpus()
+    chassis = DenseChassis(model_name=args.model, batch_size=8)
+    chassis.index_corpus(pre.process_corpus(raw_corpus))
 
-    result_dict = run_r2_evaluation(
-        model_name=args.model,
-        sample_size=sample_size,
-        top_k=args.top_k,
-        alpha=args.alpha,
-        run_grid_search=not args.no_grid,
-        use_fallback=not args.online,
-    )
+    from vera.verify.executor import VerificationSandbox
 
-    save_mteb_task_result(result_dict, R2_RESULTS_JSON)
-    save_mteb_task_result(result_dict, OFFICIAL_SUBMISSION_JSON)
+    # alpha-independent verification results are cached on disk, so the test split is executed once and can be
+    # re-blended with the alpha selected on dev without re-running any code
+    verif_cache_path = chassis.cache_dir / f"r2_verification_{args.model.split('/')[-1]}_k{args.top_k}_t{args.timeout}.json"
+    verifier = TopKVerifier(sandbox=VerificationSandbox(default_timeout=args.timeout, reduced_timeout=0.3, workers=args.workers),
+                            cache_path=str(verif_cache_path))
 
-    is_valid, errors = validate_mteb_result_schema(result_dict)
-    assert is_valid, f"Schema validation errors: {errors}"
+    # ---- dev: verify once, sweep alpha -------------------------------------------
+    selected_alpha = args.alpha
+    dev_report: Dict[str, object] = {}
+    if selected_alpha is None or args.dev_only:
+        dev_qids, dev_dense, dev_qrels = dev_candidates(chassis, ds, pre, top_k=max(args.top_k, 1000))
+        print(f"[M7] verifying dense top-{args.top_k} for {len(dev_qids)} dev queries...", flush=True)
+        t0 = time.time()
+        qvs = {}
+        for i, qid in enumerate(dev_qids):
+            ordered = sorted(dev_dense[qid].items(), key=lambda kv: kv[1], reverse=True)[: args.top_k]
+            qvs[qid] = verifier.verify_query(ds.queries_dict[qid], [d for d, _ in ordered], raw_corpus)
+            if (i + 1) % 50 == 0:
+                print(f"  {i + 1}/{len(dev_qids)} ({time.time() - t0:.0f}s)", flush=True)
+        verify_s = time.time() - t0
+        # cache the alpha-independent verification so R3/R4 scripts can reuse it without re-running code
+        verif_cache = chassis.cache_dir / f"dev_r2_verification_{args.model.split('/')[-1]}_k{args.top_k}.json"
+        verif_cache.write_text(json.dumps({q: {"n_examples": qv.n_examples, "conf": qv.conf, "passed": qv.passed,
+                                               "m_first": qv.m_first, "n_all_pass": qv.n_all_pass} for q, qv in qvs.items()}))
+        print(f"[M7] cached dev verification -> {verif_cache}", flush=True)
 
-    ndcg10 = result_dict["test"]["ndcg_at_10"]
-    mrr10 = result_dict["test"]["mrr_at_10"]
-    calibrated_alpha = result_dict["test"]["calibrated_alpha"]
+        base_metrics = compute_retrieval_metrics(dev_qrels, dev_dense)
+        gold_rank_dense = rank_of_gold(dev_qrels, dev_dense)
+        sweep = {}
+        for alpha in ALPHA_GRID:
+            reranked = {q: TopKVerifier.blend(dev_dense[q], qvs[q], alpha, args.top_k) for q in dev_qids}
+            m = compute_retrieval_metrics(dev_qrels, reranked)
+            sweep[alpha] = m
+            print(f"  alpha={alpha:.2f}  dev NDCG@10={m['ndcg_at_10']:.4f}  MRR@10={m['mrr_at_10']:.4f}  R@10={m['recall_at_10']:.4f}", flush=True)
+        best_alpha = max(ALPHA_GRID, key=lambda a: (sweep[a]["ndcg_at_10"], -a))
+        # Selection rule (fixed before looking at test): the SMALLEST alpha whose dev NDCG@10 is within 0.001 of the
+        # optimum. Differences below that are noise on 500 queries, and a smaller alpha keeps the boost closer to
+        # the "bounded, never a hard reorder" design rule.
+        PLATEAU_TOL = 0.001
+        plateau_alpha = min(a for a in ALPHA_GRID if sweep[a]["ndcg_at_10"] >= sweep[best_alpha]["ndcg_at_10"] - PLATEAU_TOL)
+        # Plan.md M7 rule: alpha = argmax of dev NDCG@10. The plateau-min value is reported as a diagnostic only.
+        # (Dev under-represents statements with examples: 46% vs 98.7% on test, so the dev curve is flat above 1.0
+        # while the test regime is much more alpha-sensitive; see docs/dev_r2.json "with_examples" sweep.)
+        if selected_alpha is None:
+            selected_alpha = best_alpha
+        # diagnostic sweep restricted to the dev queries that actually carry a worked example (test-like regime)
+        with_ex = [q for q in dev_qids if qvs[q].n_examples > 0]
+        sweep_ex = {}
+        for alpha in ALPHA_GRID:
+            rr = {q: TopKVerifier.blend(dev_dense[q], qvs[q], alpha, args.top_k) for q in with_ex}
+            sweep_ex[alpha] = compute_retrieval_metrics({q: dev_qrels[q] for q in with_ex}, rr)["ndcg_at_10"]
+        print("  dev queries WITH examples (%d): " % len(with_ex) + ", ".join(f"a={a}:{v:.4f}" for a, v in sweep_ex.items()), flush=True)
 
-    print("\n" + "=" * 65)
-    print(f" R2 Verification Results (NDCG@10: {ndcg10}, MRR@10: {mrr10}, alpha: {calibrated_alpha})")
-    print(f" Milestone JSON #3 committed: {R2_RESULTS_JSON}")
-    print(f" Official submission updated: {OFFICIAL_SUBMISSION_JSON}")
-    print("=" * 65)
+        # diagnostics: how often does the gold sit in the verified top-K, does it pass, who else passes
+        n_gold_in_topk = sum(1 for q in dev_qids if 0 < gold_rank_dense[q] <= args.top_k)
+        n_gold_pass = sum(1 for q in dev_qids if qvs[q].passed.get(next(iter(dev_qrels[q])), 0) == qvs[q].n_examples > 0)
+        n_with_examples = sum(1 for q in dev_qids if qvs[q].n_examples > 0)
+        n_unique_pass = sum(1 for q in dev_qids if qvs[q].n_all_pass == 1)
+        dev_report = {
+            "rung": "R2", "model": args.model, "top_k": args.top_k, "timeout_s": args.timeout,
+            "verify_wall_s": round(verify_s, 1), "alpha_grid": {str(a): sweep[a] for a in ALPHA_GRID},
+            "dev_r0": base_metrics, "best_alpha": best_alpha, "plateau_alpha": plateau_alpha, "plateau_tol": PLATEAU_TOL,
+            "selection_rule": "argmax dev NDCG@10 (Plan.md M7)", "selected_alpha": selected_alpha,
+            "alpha_grid_with_examples_only": {str(a): v for a, v in sweep_ex.items()}, "dev_queries_with_examples": len(with_ex),
+            "dev_r2": sweep[selected_alpha],
+            "diagnostics": {
+                "dev_queries": len(dev_qids), "queries_with_examples": n_with_examples,
+                "gold_in_dense_topk": n_gold_in_topk, "gold_passes_own_examples": n_gold_pass,
+                "queries_with_exactly_one_full_passer": n_unique_pass,
+                "mean_candidates_passing_all": round(sum(qv.n_all_pass for qv in qvs.values()) / len(qvs), 2),
+            },
+        }
+        DEV_R2_JSON.write_text(json.dumps(dev_report, indent=2))
+        (DOCS_DIR / "dev_r0.json").write_text(json.dumps({"rung": "R0", "model": args.model, "dev": base_metrics}, indent=2))
+        print(f"[M7] dev R0 NDCG@10={base_metrics['ndcg_at_10']:.4f} -> R2 NDCG@10={sweep[selected_alpha]['ndcg_at_10']:.4f} "
+              f"at alpha={selected_alpha} (argmax {best_alpha}, plateau-min {plateau_alpha}); gold in top-{args.top_k}: {n_gold_in_topk}/{len(dev_qids)}, "
+              f"gold passes: {n_gold_pass}; -> {DEV_R2_JSON}")
+        verifier.flush_cache()
+        if args.dev_only:
+            verifier.close()
+            return
+
+    # ---- test through mteb ------------------------------------------------------------
+    import mteb
+
+    verifier.alpha = selected_alpha
+    model = VERASearchProtocol(chassis=chassis, verifier=verifier, verify_top_k=args.top_k, alpha=selected_alpha,
+                               name=f"vera/VERA-R2-TopKVerify-{args.model.split('/')[-1]}")
+    task = mteb.get_task("AppsRetrieval")
+    t0 = time.time()
+    result = mteb.evaluate(model, task, cache=None, overwrite_strategy="always", co2_tracker=False, encode_kwargs={"batch_size": 8})
+    tr = result.task_results[0]
+    wall_side = Path(str(verif_cache_path).replace(".json", ".wall.json"))
+    if model.timings.get("verify_s", 0) > 120:
+        wall_side.write_text(json.dumps({"verify_wall_s": round(model.timings["verify_s"], 1), "queries": 3765, "top_k": args.top_k,
+                                         "workers": args.workers, "note": "uncached run"}))
+    uncached = json.loads(wall_side.read_text())["verify_wall_s"] if wall_side.exists() else model.timings.get("verify_s")
+    extra = {"rung": "R2", "model": args.model, "top_k": args.top_k, "alpha": selected_alpha, "timeout_s": args.timeout,
+             "wall_time_s": round(time.time() - t0, 1), "verification_wall_s_uncached": uncached,
+             "timings": model.timings, "dev": dev_report.get("dev_r2")}
+    save_mteb_task_result(tr, R2_RESULTS_JSON, extra=extra)
+    data = json.loads(R2_RESULTS_JSON.read_text())
+    ok, errors = validate_mteb_result_schema(data)
+    assert ok, errors
+    row = data["scores"]["test"][0]
+    print(f"\n TEST R2  NDCG@10={row['ndcg_at_10']:.4f}  MRR@10={row['mrr_at_10']:.4f}  R@10={row['recall_at_10']:.4f}  alpha={selected_alpha}")
+    if args.promote:
+        save_mteb_task_result(data, OFFICIAL_SUBMISSION_JSON)
+    verifier.close()
 
 
 if __name__ == "__main__":

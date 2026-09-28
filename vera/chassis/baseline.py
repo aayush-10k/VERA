@@ -1,180 +1,195 @@
 """
-VERA Dense Chassis Baseline (R0)
-================================
-Encodes problem statements and boilerplate-stripped solutions using 
-dense bi-encoder architecture with 8192 token context.
-Supports SentenceTransformers with resilient fallback to high-speed TF-IDF/SVD
-vectorization for robust, rate-limit-immune CPU execution.
+VERA Dense Chassis (L1)
+=======================
+Encodes problem statements and boilerplate-stripped solutions with a dense
+bi-encoder (default ``Alibaba-NLP/gte-modernbert-base`` at its full 8192-token
+context) and performs brute-force cosine search on CPU (8,765 docs fit in RAM;
+no ANN index needed).
+
+Backends
+--------
+``st``     sentence-transformers model (the real R0 chassis).
+``tfidf``  lexical TF-IDF reference used **only** as an explicit ablation row.
+
+There is deliberately *no* silent fallback: if the transformer cannot be loaded
+the call raises, so a milestone JSON can never be produced by accident with a
+different model than its ``model_name`` claims.
+
+Embeddings are cached under ``vera/chassis/cache`` keyed by a fingerprint of
+(model, backend, max_seq_length, texts) so the R2/R4 stages reuse them.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 CHASSIS_CACHE_DIR = Path(__file__).resolve().parent / "cache"
+DEFAULT_MODEL = "Alibaba-NLP/gte-modernbert-base"
+
+
+def _fingerprint(*parts: str) -> str:
+    h = hashlib.md5()
+    for p in parts:
+        h.update(p.encode("utf-8", errors="ignore"))
+        h.update(b"\x00")
+    return h.hexdigest()[:12]
 
 
 class DenseChassis:
-    """Manages dense embeddings, caching, and CPU similarity search."""
+    """Dense embedding, caching and CPU similarity search."""
 
     def __init__(
         self,
-        model_name: str = "Alibaba-NLP/gte-modernbert-base",
+        model_name: str = DEFAULT_MODEL,
+        backend: str = "st",
+        max_seq_length: int = 8192,
+        batch_size: int = 8,
         cache_dir: Optional[Path] = None,
-        embed_dim: int = 768,
-        batch_size: int = 32,
-        use_fallback: bool = False,
+        num_threads: Optional[int] = None,
+        show_progress: bool = True,
     ):
+        if backend not in ("st", "tfidf"):
+            raise ValueError(f"unknown backend {backend!r}")
         self.model_name = model_name
-        self.cache_dir = cache_dir or CHASSIS_CACHE_DIR
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.embed_dim = embed_dim
+        self.backend = backend
+        self.max_seq_length = max_seq_length
         self.batch_size = batch_size
-        self.use_fallback = use_fallback
+        self.cache_dir = Path(cache_dir) if cache_dir else CHASSIS_CACHE_DIR
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.num_threads = num_threads or (os.cpu_count() or 4)
+        self.show_progress = show_progress
 
         self.doc_ids: List[str] = []
         self.corpus_embeddings: Optional[np.ndarray] = None
         self._model = None
         self._vectorizer = None
+        self._corpus_sparse = None
 
-    def _get_cache_path(self, corpus_hash: str) -> Path:
-        model_hash = hashlib.md5(self.model_name.encode()).hexdigest()[:8]
-        return self.cache_dir / f"corpus_{model_hash}_{corpus_hash}.npz"
+    # ------------------------------------------------------------------ #
+    @property
+    def tag(self) -> str:
+        return f"{self.backend}-{self.model_name.split('/')[-1]}-L{self.max_seq_length}"
 
     def _load_model(self):
-        """Attempts to load transformer encoder; falls back cleanly on rate limit or offline."""
-        if self._model is not None or self.use_fallback:
-            return
+        if self._model is not None or self.backend != "st":
+            return self._model
+        import torch
+        from sentence_transformers import SentenceTransformer
 
-        try:
-            from sentence_transformers import SentenceTransformer
-            print(f"[Dense Chassis] Loading encoder: {self.model_name}...")
-            # Use small timeout or local check
-            self._model = SentenceTransformer(self.model_name, device="cpu")
-        except Exception as e:
-            print(f"[Dense Chassis] Transformer download unavailable or throttled ({e}).")
-            print("[Dense Chassis] Switching to resilient high-speed TF-IDF dense chassis.")
-            self.use_fallback = True
+        torch.set_num_threads(self.num_threads)
+        t0 = time.time()
+        model = SentenceTransformer(self.model_name, device="cpu")
+        model.max_seq_length = self.max_seq_length
+        self._model = model
+        print(f"[Dense Chassis] Loaded {self.model_name} (max_seq_length={model.max_seq_length}) in {time.time() - t0:.1f}s")
+        return model
 
-    def fit_fallback_vectorizer(self, corpus_texts: List[str]):
-        """Fits TF-IDF vectorizer over the corpus vocabulary."""
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        self._vectorizer = TfidfVectorizer(
-            max_features=self.embed_dim,
-            ngram_range=(1, 2),
-            stop_words="english",
-            norm="l2",
+    # ------------------------------------------------------------------ #
+    def encode(self, texts: Sequence[str], desc: str = "texts") -> np.ndarray:
+        """Encode texts to L2-normalized float32 vectors (no caching)."""
+        texts = [t if isinstance(t, str) and t.strip() else " " for t in texts]
+        if self.backend == "tfidf":
+            if self._vectorizer is None:
+                raise RuntimeError("tfidf backend: call index_corpus() first")
+            mat = self._vectorizer.transform(texts)
+            return mat  # sparse, already l2-normalised by the vectorizer
+        model = self._load_model()
+        t0 = time.time()
+        emb = model.encode(
+            list(texts),
+            batch_size=self.batch_size,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=self.show_progress and len(texts) > 64,
         )
-        self._vectorizer.fit(corpus_texts)
+        dt = time.time() - t0
+        print(f"[Dense Chassis] Encoded {len(texts)} {desc} in {dt:.1f}s ({len(texts) / max(dt, 1e-9):.2f}/s)")
+        return np.asarray(emb, dtype=np.float32)
 
-    def encode_texts(self, texts: List[str], normalize: bool = True) -> np.ndarray:
-        """Encodes list of strings to normalized float32 embeddings."""
-        self._load_model()
-        if self._model is not None and not self.use_fallback:
-            try:
-                embeddings = self._model.encode(
-                    texts,
-                    batch_size=self.batch_size,
-                    show_progress_bar=len(texts) > 200,
-                    normalize_embeddings=normalize,
-                )
-                return np.asarray(embeddings, dtype=np.float32)
-            except Exception as e:
-                print(f"[Dense Chassis] SentenceTransformer encode failed ({e}), falling back.")
-                self.use_fallback = True
+    def encode_cached(self, texts: Sequence[str], tag: str, force: bool = False) -> np.ndarray:
+        """Encode with an on-disk cache keyed by model + the *set* of texts (order-independent).
 
-        # High-speed TF-IDF fallback vectorization
-        if self._vectorizer is None:
-            self.fit_fallback_vectorizer(texts)
-
-        sparse_matrix = self._vectorizer.transform(texts)
-        dense = sparse_matrix.toarray().astype(np.float32)
-
-        # Pad to embed_dim if needed
-        if dense.shape[1] < self.embed_dim:
-            pad = np.zeros((dense.shape[0], self.embed_dim - dense.shape[1]), dtype=np.float32)
-            dense = np.hstack([dense, pad])
-
-        if normalize:
-            norms = np.linalg.norm(dense, axis=1, keepdims=True)
-            dense = dense / np.maximum(norms, 1e-12)
-
-        return dense
-
-    def index_corpus(
-        self,
-        corpus: Dict[str, str],
-        force_recompute: bool = False,
-    ) -> None:
+        The cache stores embeddings in sorted-text order, so the same texts presented in any order
+        (e.g. by ``mteb`` vs. the parquet loader) hit the same file. Files written by earlier versions,
+        fingerprinted in the given order, are still recognised.
         """
-        Encodes and caches all corpus documents.
-        Uses cached numpy arrays if available to save recomputation.
-        """
-        self.doc_ids = sorted(list(corpus.keys()))
-        texts = [corpus[doc_id] for doc_id in self.doc_ids]
+        texts = list(texts)
+        order = sorted(range(len(texts)), key=lambda i: texts[i])
+        sorted_texts = [texts[i] for i in order]
+        fp_sorted = _fingerprint(self.tag, str(len(texts)), *sorted_texts)
+        fp_given = _fingerprint(self.tag, str(len(texts)), *texts)
+        path = self.cache_dir / f"{self.tag}_{fp_sorted}.npy"
+        if not force:
+            for candidate, in_sorted_order in ((path, True), *[(p, True) for p in sorted(self.cache_dir.glob(f"*{self.tag}_{fp_sorted}.npy"))],
+                                               *[(p, False) for p in sorted(self.cache_dir.glob(f"*{self.tag}_{fp_given}.npy"))]):
+                if candidate.exists():
+                    emb = np.load(candidate)
+                    print(f"[Dense Chassis] Loaded cached {tag} embeddings {emb.shape} from {candidate.name}")
+                    if not in_sorted_order:
+                        # legacy given-order file: migrate it to the order-independent key so any order hits next time
+                        if not path.exists():
+                            np.save(path, emb[order])
+                        return emb
+                    out = np.empty_like(emb)
+                    out[order] = emb
+                    return out
+        emb_sorted = self.encode(sorted_texts, desc=tag)
+        if self.backend == "st":
+            np.save(path, emb_sorted)
+            print(f"[Dense Chassis] Cached {tag} embeddings -> {path.name}")
+        out = np.empty_like(emb_sorted)
+        out[order] = emb_sorted
+        return out
 
-        corpus_hash = hashlib.md5("".join(self.doc_ids[:50]).encode()).hexdigest()[:8]
-        cache_path = self._get_cache_path(corpus_hash)
+    # ------------------------------------------------------------------ #
+    def index_corpus(self, corpus: Dict[str, str], force_recompute: bool = False) -> None:
+        """Encode (or load cached) embeddings for the whole corpus."""
+        self.doc_ids = sorted(corpus.keys())
+        texts = [corpus[d] for d in self.doc_ids]
+        if self.backend == "tfidf":
+            from sklearn.feature_extraction.text import TfidfVectorizer
 
-        if not force_recompute and cache_path.exists():
-            print(f"[Dense Chassis] Loading cached corpus embeddings from {cache_path}...")
-            data = np.load(cache_path, allow_pickle=True)
-            self.corpus_embeddings = data["embeddings"]
-            self.doc_ids = list(data["doc_ids"])
-            print(f"[Dense Chassis] Loaded {len(self.doc_ids)} embeddings of shape {self.corpus_embeddings.shape}.")
+            self._vectorizer = TfidfVectorizer(
+                token_pattern=r"[A-Za-z_][A-Za-z0-9_]*|\d+|\S", ngram_range=(1, 2), sublinear_tf=True,
+                min_df=1, max_features=300000, norm="l2", lowercase=True,
+            )
+            self._corpus_sparse = self._vectorizer.fit_transform(texts)
+            self.corpus_embeddings = None
+            print(f"[Dense Chassis] TF-IDF indexed {len(texts)} docs, vocab={len(self._vectorizer.vocabulary_)}")
             return
+        self.corpus_embeddings = self.encode_cached(texts, tag="corpus", force=force_recompute)
 
-        print(f"[Dense Chassis] Encoding {len(texts)} corpus documents on CPU...")
-        if self.use_fallback or self._vectorizer is None:
-            self.fit_fallback_vectorizer(texts)
+    def encode_queries(self, queries: Dict[str, str], tag: str = "queries") -> Tuple[List[str], np.ndarray]:
+        qids = list(queries.keys())
+        embs = self.encode_cached([queries[q] for q in qids], tag=tag) if self.backend == "st" else self.encode([queries[q] for q in qids])
+        return qids, embs
 
-        self.corpus_embeddings = self.encode_texts(texts, normalize=True)
-
-        np.savez_compressed(
-            cache_path,
-            embeddings=self.corpus_embeddings,
-            doc_ids=np.array(self.doc_ids),
-        )
-        print(f"[Dense Chassis] Saved embeddings to {cache_path} ({cache_path.stat().st_size / 1024:.1f} KB).")
-
-    def search(
-        self,
-        queries: Dict[str, str],
-        top_k: int = 150,
-    ) -> Dict[str, Dict[str, float]]:
-        """
-        Runs matrix multiplication search against indexed corpus:
-        Scores = QueryEmbeddings @ CorpusEmbeddings.T
-        """
+    def similarity(self, query_embs) -> np.ndarray:
+        """Dense (n_queries x n_docs) cosine similarity matrix."""
+        if self.backend == "tfidf":
+            return (query_embs @ self._corpus_sparse.T).toarray().astype(np.float32)
         if self.corpus_embeddings is None:
             raise RuntimeError("Corpus has not been indexed! Call index_corpus() first.")
+        return np.matmul(query_embs, self.corpus_embeddings.T)
 
-        q_ids = list(queries.keys())
-        q_texts = [queries[qid] for qid in q_ids]
+    def search(self, queries: Dict[str, str], top_k: int = 150, tag: str = "queries") -> Dict[str, Dict[str, float]]:
+        """Return ``{qid: {doc_id: score}}`` for the top_k docs per query."""
+        qids, q_embs = self.encode_queries(queries, tag=tag)
+        sims = self.similarity(q_embs)
+        return self.topk_from_matrix(qids, sims, top_k)
 
-        print(f"[Dense Chassis] Encoding {len(q_texts)} queries...")
-        query_embeddings = self.encode_texts(q_texts, normalize=True)
-
-        print(f"[Dense Chassis] Computing brute-force CPU similarity ({len(q_ids)} queries x {len(self.doc_ids)} docs)...")
-        similarity_matrix = np.matmul(query_embeddings, self.corpus_embeddings.T)
-
+    def topk_from_matrix(self, qids: List[str], sims: np.ndarray, top_k: int) -> Dict[str, Dict[str, float]]:
         results: Dict[str, Dict[str, float]] = {}
-        for i, qid in enumerate(q_ids):
-            scores = similarity_matrix[i]
-            if top_k < len(scores):
-                top_indices = np.argpartition(scores, -top_k)[-top_k:]
-                sorted_top = top_indices[np.argsort(-scores[top_indices])]
-            else:
-                sorted_top = np.argsort(-scores)
-
-            results[qid] = {
-                self.doc_ids[idx]: float(scores[idx])
-                for idx in sorted_top[:top_k]
-            }
-
+        k = min(top_k, sims.shape[1])
+        for i, qid in enumerate(qids):
+            row = sims[i]
+            idx = np.argpartition(row, -k)[-k:] if k < len(row) else np.arange(len(row))
+            idx = idx[np.argsort(-row[idx])]
+            results[qid] = {self.doc_ids[j]: float(row[j]) for j in idx}
         return results

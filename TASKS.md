@@ -513,17 +513,22 @@ flowchart TD
 
 ## 5. Milestone Tracking & Verification Checklist
 
-- [x] **Task 01**: Environment pinned, data split created, leakage audit written in `docs/dataset-audit.md`
-- [x] **Task 02**: `mtebio/` dual harness emits schema-valid `TaskResult` JSON
-- [x] **Task 03**: Rung R0 baseline reproduced ($NDCG@10 \ge 0.575$)
-- [x] **Task 04**: Chassis fine-tuned with LoRA, exported to ONNX int8 (Rung R1 complete)
-- [x] **Task 05**: Worked-example parser and AST signature extractor unit-tested ($\ge 75\%$ parse rate)
-- [x] **Task 06**: High-speed sandbox and normalized comparator operational ($\le 10$ ms dispatch overhead)
-- [x] **Task 07**: 300-pair gold-run completed, gate logged in `docs/goldrun.md`
-- [x] **Task 08**: Rarity-weighted Top-K boost tuned on dev (Rung R2 guaranteed fallback secured)
-- [ ] **Task 09**: Uncertainty router & signature gate evaluated (Rung R3 conditional adoption)
-- [ ] **Task 10**: QB-Norm demotion active, `docs/ablations.md` generated, final R4 JSON emitted
-- [ ] **Task 11**: AST version store and Git/snapshot ingestion benchmarked ($>10\times$ speedup)
-- [ ] **Task 12**: Behavior fingerprinting and diff-line ranker pass synthetic benchmark
-- [ ] **Task 13**: Gradio UI operational with live badges and standing-questions watcher
-- [ ] **Task 14**: Clean CPU clone rehearsal passes; all 5 submission artifacts validated
+> **Status audit (2026-09-27).** An earlier revision of this checklist marked Tasks 01–08 done while every milestone JSON
+> was at chance level (R0 NDCG@10 = 0.0025 on a 200-query sample from a TF-IDF fallback; R1/R2 = 0.0) and the gold-run
+> read 6% because the parser was feeding the `-----Input-----` *specification* prose to the programs. Those marks were
+> reset. A task is checked below only when its exit criterion in Plan.md has been measured and the artifact exists.
+
+- [x] **Task 01**: Environment pinned (`requirements.lock`, transformers ≥ 4.48 for ModernBERT), fixed 4,500/500 split committed, leakage audit regenerated with the real parser in `docs/dataset-audit.md` (test parse rate 98.67%; train partition 46.06% — train ≠ test format mix; `partition`/`meta_information` columns identified and quarantined)
+- [x] **Task 02**: `VERASearchProtocol` implements MTEB v2 `SearchProtocol`; `mteb.evaluate` drives index/search and emits the official `TaskResult` JSON (validated: `artifacts/m2_proof_of_life.json`, TF-IDF reference NDCG@10 = 0.0262)
+- [x] **Task 03**: Rung R0 measured through `mteb.evaluate` on the full 3,765-query test split: **NDCG@10 = 0.5683**, MRR@10 0.5207, R@10 0.719, R@100 0.919 (`artifacts/m3_r0_results.json`). The plan's ≥ 0.575 exit gate is missed by 0.7 pts: the 8192-token context and boilerplate stripping do not beat the field's 1024-token reproduction (0.575), consistent with 98.3 % of test statements fitting in 1,024 tokens. Kept as the honest floor; the lift has to come from verification. (The earlier "R0" artifact was a TF-IDF fallback on 200 queries and was discarded.)
+- [ ] **Task 04**: LoRA fine-tune (R1) — **not started**. `vera/chassis/train.py` is a sketch; no model, no ONNX export, no measured dev delta. Requires a GPU session (Colab) per Plan.md.
+- [x] **Task 05**: Worked-example parser rewritten around the measured formats (Codeforces 78%, AtCoder/CodeChef 19%, LeetCode 1%): 98.67% test coverage, unit-tested; AST signature extractor present (its coverage on the corpus is not yet measured)
+- [x] **Task 06**: Sandbox rebuilt as process-isolated fork-per-run workers (real `SIGKILL` timeouts, rlimits, temp CWD, dual harness, py2/`return`-outside-function rescue), ~4–6 ms dispatch; normalized comparator incl. Python-literal equality; `tests/test_executor.py` green
+- [x] **Task 07**: Gold-run re-measured with the fixed parser+sandbox: 87.2% pass given a parseable example; projected 86.7% on the test format mix → gate = `CORPUS_WIDE_UNLOCKED` (`docs/goldrun.md`)
+- [x] **Task 08**: R2 top-150 verification with the rarity-weighted boost: α = 3.0 by argmax on the 500-pair dev split (dev NDCG@10 0.714 → 0.850; on the 236 dev queries with an example 0.598 → 0.886); **test NDCG@10 0.5683 → 0.8712** (+30.3 pts), MRR@10 0.857, R@10 0.913 (`artifacts/m7_r2_results.json`, `docs/dev_r2.json`). For the record: α = 0.2 (plan default) gives 0.6850 and α = 1.0 gives 0.8334 on test — the dev curve is flat above 1.0 because 54 % of dev statements have no example, while test is 98.7 % examples. Guaranteed fallback ship secured; root `appsretrieval_results.json` = R2.
+- [x] **Task 09**: R3 — `GatedVerifier` + uncertainty router + signature gate (`vera/gate/router.py`, `scripts/m8_corpus_gate.py`). Dev: extension to dense rank 500 for queries with top-1/top-2 margin < τ beats the base pipeline both without QB-Norm (τ = 0.03: 0.8484 → 0.8542) and with it (τ = 0.02: 0.8863 → 0.8939). **Final test (gated extension + QB-Norm): NDCG@10 0.8874**, MRR@10 0.870, R@10 0.940; 2,038/3,765 queries extended, 479k extra executions, 60 min (`artifacts/m8_r4_final_results.json`). Root `appsretrieval_results.json` = this run. Gate coverage over the corpus: 5,622/8,765 programs have a usable static I/O signature (2,226 unknown, 843 functional, 74 syntax errors).
+- [x] **Task 10**: R4 — QB-Norm hubness demotion (`vera/chassis/qbnorm.py`, `scripts/m9_qbnorm.py`): k = 3, β = 0.75 by argmax on dev with the dev statements removed from the bank (dev NDCG@10 0.848 → 0.886); **test NDCG@10 0.8712 → 0.8772**, MRR@10 0.862, R@10 0.923 (`artifacts/m9_r4_results.json`). `docs/ablations.md` regenerated with every row measured (R1 and R0b/R0c listed as *not run*). Root `appsretrieval_results.json` = R4.
+- [x] **Task 11**: Content-addressed version store (normalized-AST ids) + git/folder ingestion; measured on the synthetic 200-file × 20-commit history: **13.2× faster** incremental rebuild than full re-embed (`docs/stage2-benchmark.md`)
+- [x] **Task 12**: Behaviour fingerprints (example-mutated probe battery) and version ranker measured on 200 synthetic v1→v2→v3 histories (half regressions) with the gte encoder: refactor certified unchanged 100%; working-version-first **95.5%** overall / **86.4%** on the both-pass subset vs dense-only 80.0% / 78.0% and newest-first 45.5% (`docs/stage2-benchmark.md`). Measured rejection: the plan's 0.7·global + 0.3·diff-line blend scores 92.0% / 72.9% — worse than global similarity alone once probe consensus is in place — so the diff-line term is off by default (`docs/stage2-benchmark_wdiff03.md`).
+- [ ] **Task 13**: Gradio page built (`vera/demo/app.py`, `scripts/run_demo.py`: retrieve+verify badges, version lineage, standing questions on ingest); backend exercised headlessly, UI not yet rehearsed
+- [ ] **Task 14**: Clean CPU clone rehearsal, release tag, PPT, video — not started

@@ -102,7 +102,11 @@ def extract_program_signature(code: str) -> ProgramSignature:
         )
 
     try:
-        tree = ast.parse(code)
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(code)
     except SyntaxError as e:
         return ProgramSignature(
             io_shape="unknown",
