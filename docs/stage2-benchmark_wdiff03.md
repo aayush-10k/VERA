@@ -6,7 +6,8 @@ Encoder for global/diff-line similarity: **gte-modernbert-base** · 200 problems
 
 | Scenario | Snippet versions | Distinct snippets embedded | Incremental time | Full re-embed time | Speed-up |
 |---|---|---|---|---|---|
-| v1→v2→v3 over 200 problems | 600 | 399 | 503.55 s | 499.3 s | **0.99×** |
+| v1→v2→v3 over 200 problems | 600 | 399 | 474.4 s | 625.97 s | **1.32×** |
+| synthetic repo: 200 files × 20 commits (1–3 files change per commit) | 4000 | 238 | 316.37 s | 3890.42 s | **12.3×** |
 
 v3 (reformatted) hashes to the same id as v2, so it is never re-embedded; in the repo scenario only the 1–3 touched files per commit are embedded.
 
@@ -24,22 +25,11 @@ A sample-only checker sees no difference on the both-pass subset; the probe batt
 
 | Ranker | All problems | Both-pass subset |
 |---|---|---|
-| **VERA VersionRanker** (execution separation → probe consensus → 1.0·global + 0.0·diff-line → trace tie-break) | 191/200 = **95.5%** | 51/59 = **86.4%** |
-| same without probe consensus (execution separation → diff-line → trace) | 186/200 = 93.0% | 46/59 = 78.0% |
+| **VERA VersionRanker** (execution separation → probe consensus → 0.7·global + 0.3·diff-line → trace tie-break) | 184/200 = **92.0%** | 43/59 = **72.9%** |
+| same without probe consensus (execution separation → diff-line → trace) | 174/200 = 87.0% | 33/59 = 55.9% |
 | dense similarity only | 160/200 = 80.0% | 46/59 = 78.0% |
 | newest version first (recency prior) | 91/200 = 45.5% | 27/59 = 45.8% |
 
 Probe consensus is differential testing across the chain: two of three versions always share behaviour here (fix+refactor or good+refactor), so the odd one out is the bug whenever a probe exposes it; when no probe separates them (the remaining both-pass cases) the ranking falls back to text similarity and is a coin flip.
 
-Wall time for fingerprinting + ranking: 3336.1 s.
-
-## Ablation — diff-line term (plan default 0.7·global + 0.3·diff-line), same encoder and seed
-
-| Ranker | All problems | Both-pass subset |
-|---|---|---|
-| execution separation → probe consensus → **0.7·global + 0.3·diff-line** → trace | 184/200 = 92.0% | 43/59 = 72.9% |
-| same, **global only** (table above, shipped default) | — | — |
-
-The diff-line embedding of a one-token change is noise relative to the whole-program similarity; with probe consensus doing the
-behavioural work, the blend only hurts (both-pass 72.9 % vs 86.4 %). Dropped from the default; kept as `--w-diff 0.3`.
-The full run with the plan's weights (including the 200 × 20 repo-history rebuild timing) is `stage2-benchmark_wdiff03.md`.
+Wall time for fingerprinting + ranking: 877.4 s.

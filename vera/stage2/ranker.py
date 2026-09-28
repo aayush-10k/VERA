@@ -94,12 +94,15 @@ class VersionRanker:
         self,
         encode_fn: EncodeFn,
         sandbox: Optional[VerificationSandbox] = None,
-        w_global: float = 0.7,
-        w_diff: float = 0.3,
+        w_global: float = 1.0,
+        w_diff: float = 0.0,
         parser: Optional[WorkedExampleParser] = None,
         fingerprints: Optional[FingerprintIndex] = None,
         use_consensus: bool = True,
     ):
+        # Defaults measured on docs/stage2-benchmark.md: the diff-line term (plan default 0.7/0.3) LOSES to plain
+        # global similarity once probe consensus is in place (both-pass working-first 72.9% -> 86.4% with the gte
+        # encoder), so it is off by default and kept only as an ablation (scripts/s3_version_benchmark.py --w-diff 0.3).
         self.encode_fn = encode_fn
         self.sandbox = sandbox or VerificationSandbox(default_timeout=0.75, reduced_timeout=0.3)
         self.w_global = w_global

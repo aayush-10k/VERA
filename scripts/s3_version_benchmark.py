@@ -103,7 +103,7 @@ def main():
     ap.add_argument("--repo-files", type=int, default=200)
     ap.add_argument("--repo-commits", type=int, default=20)
     ap.add_argument("--regressions", type=float, default=0.5, help="fraction of chains where the bug is the LAST version")
-    ap.add_argument("--w-diff", type=float, default=0.3, help="diff-line weight in the blend (0 = global similarity only)")
+    ap.add_argument("--w-diff", type=float, default=0.0, help="diff-line weight in the blend (0 = global similarity only, the measured default; 0.3 = plan value, ablation)")
     ap.add_argument("--skip-repo", action="store_true", help="skip the 200x20 repo-history rebuild benchmark (slow with the gte encoder)")
     ap.add_argument("--tag", default="", help="suffix for the output files (ablation runs)")
     args = ap.parse_args()
