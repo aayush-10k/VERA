@@ -8,10 +8,12 @@ programs on it in a process-isolated sandbox, and re-ranks with a rarity-weighte
 A behaviour-fingerprint index handles code *versions*: two revisions are "the same" when they
 **do** the same thing on a probe battery, not when they read the same.
 
-> **Status (2026-09-27).** The verification engine, the MTEB harness and the Stage-2 modules are
-> built and measured; the dense chassis runs are in progress on CPU. Every number below comes
-> from a script in `scripts/` on this repository — see `docs/ablations.md` for the live table and
-> `TASKS.md` for the honest checklist (including which earlier claims were withdrawn and why).
+> **Status (2026-09-28).** Every rung of the ship ladder is measured on the full 3,765-query test
+> split through `mteb.evaluate`: dense chassis **0.5683** → top-150 verification **0.8712** → + QB-Norm
+> **0.8772** → + gated corpus-wide extension **0.8874 NDCG@10** (`appsretrieval_results.json`).
+> Every number below comes from a script in `scripts/` on this repository — see `docs/ablations.md`
+> for the table and `TASKS.md` for the honest checklist (including which earlier claims were
+> withdrawn and why). Not done: the R1 LoRA fine-tune (needs a GPU), the release tag, PPT and video.
 
 ---
 
@@ -27,8 +29,8 @@ A behaviour-fingerprint index handles code *versions*: two revisions are "the sa
 | Stage-2 ranking (Bonus) | working-version-first **89.5 %** (dense-only 51.5 %); on the both-pass subset **66.1 %** vs 55.9 % | `docs/stage2-benchmark.md` |
 | R0 dense baseline | **NDCG@10 0.5683** · MRR@10 0.5207 · R@10 0.719 · R@100 0.919 on the full 3,765-query test split via `mteb.evaluate` (published zero-shot 56.4; a competitor's 1024-token reproduction 57.5) | `artifacts/m3_r0_results.json` |
 | **R2 top-150 verification + rarity boost** | **NDCG@10 0.8712** · MRR@10 0.8573 · R@10 0.913 · R@100 0.938 on the full test split (α = 3.0 by argmax on the 500-pair dev split; dev sweep 0.714 → 0.850; on the 236 dev queries that carry an example 0.598 → 0.886). 57 min of sandboxed execution for 3,765 × 150 candidates on 4 cores. | `artifacts/m7_r2_results.json`, `docs/dev_r2.json` |
-| **R4 = R2 + QB-Norm demotion** (current submission) | **NDCG@10 0.8772** · MRR@10 0.8621 · R@10 0.923 · R@100 0.943. Hubness of each corpus doc to the bank of 5,000 public train statements (top-3 mean), β = 0.75 by argmax on dev with the dev statements removed from the bank (dev 0.848 → 0.886; test +0.6). Content only — the `partition` column is never read. | `artifacts/m9_r4_results.json`, `docs/dev_r4.json` |
-| R3 gated corpus-wide extension | dev evaluation vs R2 (router τ + signature gate, dense ranks 150–500) | `docs/dev_r3.json`, `docs/ablations.md` |
+| R2 + QB-Norm demotion | **NDCG@10 0.8772** · MRR@10 0.8621 · R@10 0.923. Hubness of each corpus doc to the bank of 5,000 public train statements (top-3 mean), β = 0.75 by argmax on dev with the dev statements removed from the bank (dev 0.848 → 0.886; test +0.6). Content only — the `partition` column is never read. | `artifacts/m9_r4_results.json`, `docs/dev_r4.json` |
+| **Final = gated extension + QB-Norm** (current submission) | **NDCG@10 0.8874** · MRR@10 0.8703 · R@10 0.940. Uncertainty router (dense top-1/top-2 margin < τ = 0.02, fit on dev) extends verification from rank 150 to rank 500 through the static signature gate for 2,038 of 3,765 test queries (479k extra executions, 60 min on 4 cores). Dev: 0.8863 → 0.8939. | `artifacts/m8_r4_final_results.json`, `docs/dev_r4_final.json`, `appsretrieval_results.json` |
 
 ---
 
