@@ -52,6 +52,7 @@ def main():
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--timeout", type=float, default=0.75)
     ap.add_argument("--force-test", action="store_true")
+    ap.add_argument("--dev-only", action="store_true")
     ap.add_argument("--promote", action="store_true")
     args = ap.parse_args()
 
@@ -107,7 +108,7 @@ def main():
               "gain_ndcg10_vs_r2": round(gain, 5), "decision": decision}
     (DOCS_DIR / "dev_r4.json").write_text(json.dumps(report, indent=2))
     print(f"[M9] {decision}: k={best_k} beta={best_beta} dev NDCG@10 {best[1]:.4f} vs R2 {r2['ndcg_at_10']:.4f} -> docs/dev_r4.json")
-    if decision == "REJECT" and not args.force_test:
+    if args.dev_only or (decision == "REJECT" and not args.force_test):
         return
 
     import mteb
@@ -115,7 +116,8 @@ def main():
     hub_all = QBNorm.hubness(chassis.corpus_embeddings, embs, k=best_k)   # bank = all 5,000 train statements
     qb = QBNorm(hub=hub_all, beta=best_beta)
     sandbox = VerificationSandbox(default_timeout=args.timeout, reduced_timeout=0.3, workers=args.workers)
-    verifier = TopKVerifier(sandbox=sandbox, default_alpha=alpha)
+    verifier = TopKVerifier(sandbox=sandbox, default_alpha=alpha,
+                            cache_path=str(chassis.cache_dir / f"r2_verification_{args.model.split('/')[-1]}_k{args.top_k}_t{args.timeout}.json"))
     model = VERASearchProtocol(chassis=chassis, verifier=verifier, verify_top_k=args.top_k, alpha=alpha, qbnorm=qb,
                                name=f"vera/VERA-R4-QBNorm-{args.model.split('/')[-1]}")
     t0 = time.time()

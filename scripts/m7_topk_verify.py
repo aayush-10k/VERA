@@ -37,7 +37,7 @@ R2_RESULTS_JSON = ARTIFACTS_DIR / "m7_r2_results.json"
 OFFICIAL_SUBMISSION_JSON = PROJECT_ROOT / "appsretrieval_results.json"
 DEV_R2_JSON = DOCS_DIR / "dev_r2.json"
 
-ALPHA_GRID = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.75, 1.0]
+ALPHA_GRID = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0]
 
 
 def dev_candidates(chassis: DenseChassis, ds: AppsRetrievalDataset, pre: ChassisPreprocessor, top_k: int):
@@ -110,8 +110,23 @@ def main():
             sweep[alpha] = m
             print(f"  alpha={alpha:.2f}  dev NDCG@10={m['ndcg_at_10']:.4f}  MRR@10={m['mrr_at_10']:.4f}  R@10={m['recall_at_10']:.4f}", flush=True)
         best_alpha = max(ALPHA_GRID, key=lambda a: (sweep[a]["ndcg_at_10"], -a))
+        # Selection rule (fixed before looking at test): the SMALLEST alpha whose dev NDCG@10 is within 0.001 of the
+        # optimum. Differences below that are noise on 500 queries, and a smaller alpha keeps the boost closer to
+        # the "bounded, never a hard reorder" design rule.
+        PLATEAU_TOL = 0.001
+        plateau_alpha = min(a for a in ALPHA_GRID if sweep[a]["ndcg_at_10"] >= sweep[best_alpha]["ndcg_at_10"] - PLATEAU_TOL)
+        # Plan.md M7 rule: alpha = argmax of dev NDCG@10. The plateau-min value is reported as a diagnostic only.
+        # (Dev under-represents statements with examples: 46% vs 98.7% on test, so the dev curve is flat above 1.0
+        # while the test regime is much more alpha-sensitive; see docs/dev_r2.json "with_examples" sweep.)
         if selected_alpha is None:
             selected_alpha = best_alpha
+        # diagnostic sweep restricted to the dev queries that actually carry a worked example (test-like regime)
+        with_ex = [q for q in dev_qids if qvs[q].n_examples > 0]
+        sweep_ex = {}
+        for alpha in ALPHA_GRID:
+            rr = {q: TopKVerifier.blend(dev_dense[q], qvs[q], alpha, args.top_k) for q in with_ex}
+            sweep_ex[alpha] = compute_retrieval_metrics({q: dev_qrels[q] for q in with_ex}, rr)["ndcg_at_10"]
+        print("  dev queries WITH examples (%d): " % len(with_ex) + ", ".join(f"a={a}:{v:.4f}" for a, v in sweep_ex.items()), flush=True)
 
         # diagnostics: how often does the gold sit in the verified top-K, does it pass, who else passes
         n_gold_in_topk = sum(1 for q in dev_qids if 0 < gold_rank_dense[q] <= args.top_k)
@@ -121,7 +136,9 @@ def main():
         dev_report = {
             "rung": "R2", "model": args.model, "top_k": args.top_k, "timeout_s": args.timeout,
             "verify_wall_s": round(verify_s, 1), "alpha_grid": {str(a): sweep[a] for a in ALPHA_GRID},
-            "dev_r0": base_metrics, "best_alpha": best_alpha, "selected_alpha": selected_alpha,
+            "dev_r0": base_metrics, "best_alpha": best_alpha, "plateau_alpha": plateau_alpha, "plateau_tol": PLATEAU_TOL,
+            "selection_rule": "argmax dev NDCG@10 (Plan.md M7)", "selected_alpha": selected_alpha,
+            "alpha_grid_with_examples_only": {str(a): v for a, v in sweep_ex.items()}, "dev_queries_with_examples": len(with_ex),
             "dev_r2": sweep[selected_alpha],
             "diagnostics": {
                 "dev_queries": len(dev_qids), "queries_with_examples": n_with_examples,
@@ -133,7 +150,7 @@ def main():
         DEV_R2_JSON.write_text(json.dumps(dev_report, indent=2))
         (DOCS_DIR / "dev_r0.json").write_text(json.dumps({"rung": "R0", "model": args.model, "dev": base_metrics}, indent=2))
         print(f"[M7] dev R0 NDCG@10={base_metrics['ndcg_at_10']:.4f} -> R2 NDCG@10={sweep[selected_alpha]['ndcg_at_10']:.4f} "
-              f"at alpha={selected_alpha} (best {best_alpha}); gold in top-{args.top_k}: {n_gold_in_topk}/{len(dev_qids)}, "
+              f"at alpha={selected_alpha} (argmax {best_alpha}, plateau-min {plateau_alpha}); gold in top-{args.top_k}: {n_gold_in_topk}/{len(dev_qids)}, "
               f"gold passes: {n_gold_pass}; -> {DEV_R2_JSON}")
         verifier.flush_cache()
         if args.dev_only:

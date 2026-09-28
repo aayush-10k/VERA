@@ -64,6 +64,7 @@ def main():
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--timeout", type=float, default=0.75)
     ap.add_argument("--force-test", action="store_true")
+    ap.add_argument("--dev-only", action="store_true")
     ap.add_argument("--promote", action="store_true")
     args = ap.parse_args()
 
@@ -153,14 +154,15 @@ def main():
     (DOCS_DIR / "dev_r3.json").write_text(json.dumps(report, indent=2))
     print(f"[M8] {decision}: best tau={best_tau} dev NDCG@10 {sweep[best_tau]['ndcg_at_10']:.4f} vs R2 {r2_metrics['ndcg_at_10']:.4f} "
           f"(gold beyond top-{args.base_k}: {report['gold_beyond_base_k']}, within extend: {report['gold_within_extend_k']}) -> docs/dev_r3.json")
-    if decision == "REJECT" and not args.force_test:
+    if args.dev_only or (decision == "REJECT" and not args.force_test):
         return
 
     # ---- test through mteb ------------------------------------------------------------------
     import mteb
 
     sandbox = VerificationSandbox(default_timeout=args.timeout, reduced_timeout=0.3, workers=args.workers)
-    verifier = GatedVerifier(base_k=args.base_k, extend_k=extend_k, tau=best_tau, gate=gate, sandbox=sandbox, default_alpha=alpha)
+    verifier = GatedVerifier(base_k=args.base_k, extend_k=extend_k, tau=best_tau, gate=gate, sandbox=sandbox, default_alpha=alpha,
+                             cache_path=str(chassis.cache_dir / f"r3_verification_{args.model.split('/')[-1]}_k{args.base_k}_e{extend_k}.json"))
     model = VERASearchProtocol(chassis=chassis, verifier=verifier, verify_top_k=extend_k, alpha=alpha,
                                name=f"vera/VERA-R3-GatedCorpusWide-{args.model.split('/')[-1]}")
     t0 = time.time()
