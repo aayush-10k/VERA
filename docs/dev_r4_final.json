@@ -20,7 +20,7 @@
   "gate_eligible": 5622,
   "gold_beyond_base_k": 15,
   "gold_within_extend_k": 8,
-  "verification_wall_s": 447.8,
+  "verification_wall_s": 0.9,
   "extension_candidates_total": 143072,
   "dev_base": {
     "ndcg_at_1": 0.828,
