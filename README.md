@@ -27,7 +27,8 @@ A behaviour-fingerprint index handles code *versions*: two revisions are "the sa
 | Stage-2 ranking (Bonus) | working-version-first **89.5 %** (dense-only 51.5 %); on the both-pass subset **66.1 %** vs 55.9 % | `docs/stage2-benchmark.md` |
 | R0 dense baseline | **NDCG@10 0.5683** · MRR@10 0.5207 · R@10 0.719 · R@100 0.919 on the full 3,765-query test split via `mteb.evaluate` (published zero-shot 56.4; a competitor's 1024-token reproduction 57.5) | `artifacts/m3_r0_results.json` |
 | **R2 top-150 verification + rarity boost** | **NDCG@10 0.8712** · MRR@10 0.8573 · R@10 0.913 · R@100 0.938 on the full test split (α = 3.0 by argmax on the 500-pair dev split; dev sweep 0.714 → 0.850; on the 236 dev queries that carry an example 0.598 → 0.886). 57 min of sandboxed execution for 3,765 × 150 candidates on 4 cores. | `artifacts/m7_r2_results.json`, `docs/dev_r2.json` |
-| R3 / R4 | gated corpus-wide extension (R3) and QB-Norm demotion (R4): dev sweeps and test runs | `docs/dev_r3.json`, `docs/dev_r4.json`, `docs/ablations.md` |
+| **R4 = R2 + QB-Norm demotion** (current submission) | **NDCG@10 0.8772** · MRR@10 0.8621 · R@10 0.923 · R@100 0.943. Hubness of each corpus doc to the bank of 5,000 public train statements (top-3 mean), β = 0.75 by argmax on dev with the dev statements removed from the bank (dev 0.848 → 0.886; test +0.6). Content only — the `partition` column is never read. | `artifacts/m9_r4_results.json`, `docs/dev_r4.json` |
+| R3 gated corpus-wide extension | dev evaluation vs R2 (router τ + signature gate, dense ranks 150–500) | `docs/dev_r3.json`, `docs/ablations.md` |
 
 ---
 
