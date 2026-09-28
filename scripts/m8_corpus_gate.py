@@ -18,6 +18,11 @@ decision is made for the *combined* final pipeline R3 + QB-Norm (Plan.md R4).
 
 If the extension does not beat the base pipeline on dev, the rejection is recorded and no
 test JSON is produced unless ``--force-test``.
+
+``--tau`` pins the router threshold to a value already selected on dev (``docs/dev_r3.json`` /
+``docs/dev_r4_final.json``) and skips the dev extension verification and sweep entirely — the
+reproduction path used by ``scripts/reproduce_submission.py`` (nothing is fit on test; the recorded
+dev fit is applied as-is, exactly like ``m7_topk_verify.py --alpha``).
 """
 
 from __future__ import annotations
@@ -82,6 +87,7 @@ def main():
     ap.add_argument("--extend-k", type=int, default=500)
     ap.add_argument("--full-corpus", action="store_true")
     ap.add_argument("--alpha", type=float, default=None, help="alpha (default: selected by m7 in docs/dev_r2.json)")
+    ap.add_argument("--tau", type=float, default=None, help="fixed router tau (skips the dev extension verification + sweep; use the value recorded in docs/dev_r3.json or docs/dev_r4_final.json)")
     ap.add_argument("--qbnorm", action="store_true", help="apply the QB-Norm selected in docs/dev_r4.json (combined final pipeline)")
     ap.add_argument("--timeout", type=float, default=0.75)
     ap.add_argument("--workers", type=int, default=None)
@@ -92,6 +98,9 @@ def main():
 
     alpha = args.alpha if args.alpha is not None else float(json.loads((DOCS_DIR / "dev_r2.json").read_text())["selected_alpha"])
     label = "r4_final" if args.qbnorm else "r3"
+    rung_label = "R4-final (R3 + QB-Norm)" if args.qbnorm else "R3"
+    if args.tau is not None and args.dev_only:
+        ap.error("--tau pins the dev fit; it cannot be combined with --dev-only")
     ds = AppsRetrievalDataset()
     pre = ChassisPreprocessor()
     raw_corpus = ds.get_corpus()
@@ -124,57 +133,69 @@ def main():
     gate = SignatureGate(raw_corpus)
     print(f"[M8] gate coverage: {gate.coverage()}  eligible={len(gate.eligible)}/{len(raw_corpus)}", flush=True)
 
-    # ---- verify base + extension once per dev query (cached), then simulate tau -------------------------
-    sandbox = VerificationSandbox(default_timeout=args.timeout, reduced_timeout=0.3, workers=args.workers)
-    verifier = GatedVerifier(base_k=args.base_k, extend_k=extend_k, tau=1.0, gate=gate, sandbox=sandbox, cache_path=cache_path)
-    print(f"[M8] verifying base top-{args.base_k} + extension ranks {args.base_k}..{extend_k} (gate-filtered) for {len(dev_qids)} dev queries...", flush=True)
-    t0 = time.time()
-    all_qv: Dict[str, QueryVerification] = {}
-    base_ids: Dict[str, List[str]] = {}
-    ext_ids: Dict[str, List[str]] = {}
-    margins: Dict[str, float] = {}
-    n_extra = 0
-    for i, q in enumerate(dev_qids):
-        ordered = sorted(dense[q].items(), key=lambda kv: kv[1], reverse=True)
-        margins[q] = UncertaintyRouter.margin(dense[q])
-        ids = verifier.candidate_ids(ds.queries_dict[q], ordered)
-        base_ids[q], ext_ids[q] = ids[: args.base_k], ids[args.base_k:]
-        n_extra += len(ext_ids[q])
-        all_qv[q] = verifier.verify_query(ds.queries_dict[q], ids, raw_corpus)
-        if (i + 1) % 50 == 0:
-            print(f"  {i + 1}/{len(dev_qids)}  extension candidates so far {n_extra}  ({time.time() - t0:.0f}s)", flush=True)
-    verifier.flush_cache()
-    ext_s = time.time() - t0
-    sandbox.close()
+    if args.tau is not None:
+        # ---- reproduction: apply the recorded dev fit, run nothing on dev ---------------------------------
+        best_tau = float(args.tau)
+        recorded_path = DOCS_DIR / f"dev_{label}.json"
+        recorded = json.loads(recorded_path.read_text()) if recorded_path.exists() else {}
+        dev_summary = recorded.get("dev_r3") if recorded.get("best_tau") == best_tau else None
+        report = {"rung": rung_label}
+        print(f"[M8] tau pinned at {best_tau} (--tau): dev extension verification + sweep skipped"
+              + (f"; matches the recorded dev fit in docs/dev_{label}.json" if dev_summary
+                 else f"; no recorded dev fit with tau={best_tau} in docs/dev_{label}.json"), flush=True)
+    else:
+        # ---- verify base + extension once per dev query (cached), then simulate tau -------------------------
+        sandbox = VerificationSandbox(default_timeout=args.timeout, reduced_timeout=0.3, workers=args.workers)
+        verifier = GatedVerifier(base_k=args.base_k, extend_k=extend_k, tau=1.0, gate=gate, sandbox=sandbox, cache_path=cache_path)
+        print(f"[M8] verifying base top-{args.base_k} + extension ranks {args.base_k}..{extend_k} (gate-filtered) for {len(dev_qids)} dev queries...", flush=True)
+        t0 = time.time()
+        all_qv: Dict[str, QueryVerification] = {}
+        base_ids: Dict[str, List[str]] = {}
+        ext_ids: Dict[str, List[str]] = {}
+        margins: Dict[str, float] = {}
+        n_extra = 0
+        for i, q in enumerate(dev_qids):
+            ordered = sorted(dense[q].items(), key=lambda kv: kv[1], reverse=True)
+            margins[q] = UncertaintyRouter.margin(dense[q])
+            ids = verifier.candidate_ids(ds.queries_dict[q], ordered)
+            base_ids[q], ext_ids[q] = ids[: args.base_k], ids[args.base_k:]
+            n_extra += len(ext_ids[q])
+            all_qv[q] = verifier.verify_query(ds.queries_dict[q], ids, raw_corpus)
+            if (i + 1) % 50 == 0:
+                print(f"  {i + 1}/{len(dev_qids)}  extension candidates so far {n_extra}  ({time.time() - t0:.0f}s)", flush=True)
+        verifier.flush_cache()
+        ext_s = time.time() - t0
+        sandbox.close()
 
-    base_metrics = compute_retrieval_metrics(qrels, {q: TopKVerifier.blend(dense[q], restrict(all_qv[q], base_ids[q]), alpha, len(dense[q])) for q in dev_qids})
-    sweep = {}
-    for tau in TAU_GRID:
-        rr = {}
-        for q in dev_qids:
-            ids = base_ids[q] + (ext_ids[q] if margins[q] < tau else [])
-            rr[q] = TopKVerifier.blend(dense[q], restrict(all_qv[q], ids), alpha, len(dense[q]))
-        m = compute_retrieval_metrics(qrels, rr)
-        n_ext = sum(1 for q in dev_qids if margins[q] < tau)
-        sweep[tau] = {**m, "queries_extended": n_ext}
-        print(f"  tau={tau:<6} extended={n_ext:3d}  dev NDCG@10={m['ndcg_at_10']:.4f} (base {base_metrics['ndcg_at_10']:.4f})", flush=True)
-    best_tau = max(TAU_GRID, key=lambda t: (sweep[t]["ndcg_at_10"], -sweep[t]["queries_extended"]))
-    gain = sweep[best_tau]["ndcg_at_10"] - base_metrics["ndcg_at_10"]
-    decision = "ADOPT" if gain > 0 and best_tau > 0 else "REJECT"
-    report = {
-        "rung": "R4-final (R3 + QB-Norm)" if args.qbnorm else "R3", "model": args.model, "alpha": alpha, "qbnorm": qb_cfg,
-        "base_k": args.base_k, "extend_k": extend_k, "gate_coverage": gate.coverage(), "gate_eligible": len(gate.eligible),
-        "gold_beyond_base_k": sum(1 for q in dev_qids if gold_rank[q] == 0 or gold_rank[q] > args.base_k),
-        "gold_within_extend_k": sum(1 for q in dev_qids if args.base_k < gold_rank[q] <= extend_k),
-        "verification_wall_s": round(ext_s, 1), "extension_candidates_total": n_extra,
-        "dev_base": base_metrics, "tau_grid": {str(t): sweep[t] for t in TAU_GRID}, "best_tau": best_tau,
-        "dev_r3": sweep[best_tau], "gain_ndcg10": round(gain, 5), "decision": decision,
-    }
-    (DOCS_DIR / f"dev_{label}.json").write_text(json.dumps(report, indent=2))
-    print(f"[M8] {decision}: best tau={best_tau} dev NDCG@10 {sweep[best_tau]['ndcg_at_10']:.4f} vs base {base_metrics['ndcg_at_10']:.4f} "
-          f"(gold beyond top-{args.base_k}: {report['gold_beyond_base_k']}, within extend: {report['gold_within_extend_k']}) -> docs/dev_{label}.json")
-    if args.dev_only or (decision == "REJECT" and not args.force_test):
-        return
+        base_metrics = compute_retrieval_metrics(qrels, {q: TopKVerifier.blend(dense[q], restrict(all_qv[q], base_ids[q]), alpha, len(dense[q])) for q in dev_qids})
+        sweep = {}
+        for tau in TAU_GRID:
+            rr = {}
+            for q in dev_qids:
+                ids = base_ids[q] + (ext_ids[q] if margins[q] < tau else [])
+                rr[q] = TopKVerifier.blend(dense[q], restrict(all_qv[q], ids), alpha, len(dense[q]))
+            m = compute_retrieval_metrics(qrels, rr)
+            n_ext = sum(1 for q in dev_qids if margins[q] < tau)
+            sweep[tau] = {**m, "queries_extended": n_ext}
+            print(f"  tau={tau:<6} extended={n_ext:3d}  dev NDCG@10={m['ndcg_at_10']:.4f} (base {base_metrics['ndcg_at_10']:.4f})", flush=True)
+        best_tau = max(TAU_GRID, key=lambda t: (sweep[t]["ndcg_at_10"], -sweep[t]["queries_extended"]))
+        dev_summary = sweep[best_tau]
+        gain = sweep[best_tau]["ndcg_at_10"] - base_metrics["ndcg_at_10"]
+        decision = "ADOPT" if gain > 0 and best_tau > 0 else "REJECT"
+        report = {
+            "rung": rung_label, "model": args.model, "alpha": alpha, "qbnorm": qb_cfg,
+            "base_k": args.base_k, "extend_k": extend_k, "gate_coverage": gate.coverage(), "gate_eligible": len(gate.eligible),
+            "gold_beyond_base_k": sum(1 for q in dev_qids if gold_rank[q] == 0 or gold_rank[q] > args.base_k),
+            "gold_within_extend_k": sum(1 for q in dev_qids if args.base_k < gold_rank[q] <= extend_k),
+            "verification_wall_s": round(ext_s, 1), "extension_candidates_total": n_extra,
+            "dev_base": base_metrics, "tau_grid": {str(t): sweep[t] for t in TAU_GRID}, "best_tau": best_tau,
+            "dev_r3": sweep[best_tau], "gain_ndcg10": round(gain, 5), "decision": decision,
+        }
+        (DOCS_DIR / f"dev_{label}.json").write_text(json.dumps(report, indent=2))
+        print(f"[M8] {decision}: best tau={best_tau} dev NDCG@10 {sweep[best_tau]['ndcg_at_10']:.4f} vs base {base_metrics['ndcg_at_10']:.4f} "
+              f"(gold beyond top-{args.base_k}: {report['gold_beyond_base_k']}, within extend: {report['gold_within_extend_k']}) -> docs/dev_{label}.json")
+        if args.dev_only or (decision == "REJECT" and not args.force_test):
+            return
 
     # ---- test through mteb ------------------------------------------------------------------
     import mteb
@@ -193,7 +214,7 @@ def main():
     out = ARTIFACTS_DIR / f"m8_{label}_results.json"
     extra = {"rung": report["rung"], "model": args.model, "alpha": alpha, "top_k": args.base_k, "extend_k": extend_k, "tau": best_tau,
              "beta": qb_cfg["beta"] if qb_cfg else None, "qb_k": qb_cfg["k"] if qb_cfg else None, "router_stats": verifier.stats,
-             "wall_time_s": round(time.time() - t0, 1), "timings": model.timings, "dev": sweep[best_tau]}
+             "wall_time_s": round(time.time() - t0, 1), "timings": model.timings, "dev": dev_summary}
     save_mteb_task_result(result.task_results[0], out, extra=extra)
     data = json.loads(out.read_text())
     ok, errors = validate_mteb_result_schema(data)

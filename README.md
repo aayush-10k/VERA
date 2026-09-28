@@ -23,7 +23,7 @@ A behaviour-fingerprint index handles code *versions*: two revisions are "the sa
 |---|---|---|
 | Worked-example parser | **98.67 %** of the 3,765 test statements yield executable `(stdin, expected)` pairs (Codeforces 78.3 %, AtCoder/CodeChef 19.2 %, LeetCode 1.0 %) | `docs/dataset-audit.md` |
 | Gold-run gate (M4) | gold passes its own example in **87.2 %** of parseable train pairs; **86.7 %** projected on the test format mix → corpus-wide track unlocked | `docs/goldrun.md` |
-| Sandbox | fork-per-run isolated worker, SIGKILL timeouts, rlimits; ≈ 4–6 ms dispatch; 45 unit tests green | `vera/verify/executor.py`, `tests/` |
+| Sandbox | fork-per-run isolated worker, SIGKILL timeouts, rlimits; ≈ 4–6 ms dispatch; 53 unit tests green | `vera/verify/executor.py`, `tests/` |
 | MTEB harness | `VERASearchProtocol` runs inside `mteb.evaluate`; TF-IDF reference row NDCG@10 = **0.0262** (BM25 in the field ≈ 0.0095) | `artifacts/ref_tfidf_results.json` |
 | Stage-2 store (P1) | incremental rebuild **12.3×** faster than full re-embed on a 200-file × 20-commit history with the gte encoder (13.2× with TF-IDF) | `docs/stage2-benchmark_wdiff03.md` |
 | Stage-2 fingerprints + ranking (Bonus) | cosmetic refactors certified *behaviorally unchanged* 100 %; working-version-first **95.5 %** (dense-only 80.0 %, newest-first 45.5 %); on the both-pass subset **86.4 %** vs 78.0 %. The plan's 0.3 diff-line weight was measured to hurt (72.9 % both-pass) and dropped. | `docs/stage2-benchmark.md` |
@@ -71,15 +71,25 @@ git clone <this repo> && cd VERA
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.lock --extra-index-url https://download.pytorch.org/whl/cpu
 
-pytest tests/ -q                                  # 45 tests, ~15 s
+pytest tests/ -q                                  # 53 tests, ~15 s
 
-python scripts/reproduce_submission.py            # highest rung with a recorded dev fit -> appsretrieval_results.json
-python scripts/reproduce_submission.py --rung R0  # dense baseline only
+python scripts/reproduce_submission.py --dry-run  # prints the milestone command it will run
+python scripts/reproduce_submission.py            # submitted pipeline (R4) -> appsretrieval_results.json, expect NDCG@10 0.8874
+python scripts/reproduce_submission.py --rung R2  # any lower rung: R0 0.5683 · R2 0.8712 · R3 0.8822 · R4a 0.8772
 ```
 
-Cold-start cost on a 4-core CPU: model download ≈ 300 MB, corpus embedding ≈ 45 min, test-query
-embedding ≈ 25 min (both cached under `vera/chassis/cache/`), then R2 verification ≈ 30 min.
-Warm re-runs take a few minutes. `transformers >= 4.48` is required (ModernBERT).
+The default run is exactly `scripts/m8_corpus_gate.py --qbnorm --tau 0.02 --promote`: the gated
+extension + QB-Norm pipeline that produced `appsretrieval_results.json`. Nothing is fit on test — the
+dev-selected α = 3.0, (k, β) = (3, 0.75) and τ = 0.02 recorded in `docs/dev_r2.json`, `docs/dev_r4.json`
+and `docs/dev_r4_final.json` are applied unchanged. The script validates the JSON and compares the
+number with the recorded artifact.
+
+Cold-start cost on a 4-core CPU (measured): model download ≈ 300 MB; corpus embedding ≈ 45 min and
+test-query embedding ≈ 25 min (cached under `vera/chassis/cache/`); base top-150 verification ≈ 57 min;
+the R4 gated extension ≈ 60 min more (2,038 queries extended, 479k extra executions). About 3 h in
+total for R4, ≈ 2 h for R2. Per-query verification results are cached too, so warm re-runs take a few
+minutes. Requirements: Python 3.11, `transformers >= 4.48` (ModernBERT), and Linux or macOS — the
+sandbox uses `os.fork` and `resource` (use WSL2 on Windows).
 
 Milestone scripts, each writing its artifact:
 
@@ -90,10 +100,11 @@ Milestone scripts, each writing its artifact:
 | `scripts/m3_baseline.py` | `artifacts/m3_r0_results.json`, `docs/dev_r0.json` |
 | `scripts/m4_goldrun.py` | `docs/goldrun.md` |
 | `scripts/m7_topk_verify.py` | `docs/dev_r2.json` (α sweep), `artifacts/m7_r2_results.json` |
-| `scripts/m8_corpus_gate.py` | `docs/dev_r3.json`, `artifacts/m8_r3_results.json` (only if R3 wins on dev) |
-| `scripts/m9_qbnorm.py` | `docs/dev_r4.json`, `artifacts/m9_r4_results.json` (only if R4 wins on dev) |
+| `scripts/m8_corpus_gate.py` | `docs/dev_r3.json`, `artifacts/m8_r3_results.json` (only if R3 wins on dev); with `--qbnorm`: `docs/dev_r4_final.json`, `artifacts/m8_r4_final_results.json` — **the submitted pipeline** |
+| `scripts/m9_qbnorm.py` | `docs/dev_r4.json`, `artifacts/m9_r4_results.json` (R4a: QB-Norm without the extension; only if it wins on dev) |
 | `python -m vera.eval.ablation` | `docs/ablations.md` |
 | `scripts/s3_version_benchmark.py` | `docs/stage2-benchmark.md` |
+| `scripts/reproduce_submission.py` | `appsretrieval_results.json` from the recorded dev fits (`--rung`, `--dry-run`) |
 | `scripts/run_demo.py` | Gradio page (`--encoder tfidf` for an instant start) |
 | `python -m vera.chassis.train --device cuda --lora` | R1 fine-tuned chassis (GPU session; not yet run) |
 
