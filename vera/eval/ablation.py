@@ -18,16 +18,17 @@ ARTIFACTS = PROJECT_ROOT / "artifacts"
 DOCS = PROJECT_ROOT / "docs"
 
 # (label, test artifact, dev json, description)
-ROWS: List[Tuple[str, str, Optional[str], str]] = [
-    ("REF  lexical TF-IDF (word+bigram)", "ref_tfidf_results.json", "dev_ref_tfidf.json", "reference only, never submitted"),
-    ("R0   gte-modernbert-base, 8192 ctx, stripped corpus", "m3_r0_results.json", "dev_r0.json", "dense chassis, zero-shot"),
-    ("R0b  R0 with raw (unstripped) corpus", "m3_r0_raw_results.json", None, "preprocessing ablation"),
-    ("R0c  R0 with the example section dropped from the embedded query", "m3_r0_noqex_results.json", None, "query ablation"),
-    ("R1   R0 + LoRA fine-tune", "m5_r1_results.json", "dev_r1.json", "requires GPU session"),
-    ("R2   R0/R1 + top-150 verification, rarity boost", "m7_r2_results.json", "dev_r2.json", "alpha fit on dev"),
-    ("R3   R2 + gated extension to dense rank 500 (router tau)", "m8_r3_results.json", "dev_r3.json", "tau fit on dev"),
-    ("R4a  R2 + QB-Norm demotion (no extension)", "m9_r4_results.json", "dev_r4.json", "beta fit on dev"),
-    ("R4   final: gated extension + QB-Norm", "m8_r4_final_results.json", "dev_r4_final.json", "plan R4; tau re-fit on dev with QB-Norm applied"),
+ROWS: List[Tuple[str, str, Optional[str], str, Optional[str]]] = [
+    # (label, test artifact, dev json, description, baseline label for the delta column)
+    ("REF  lexical TF-IDF (word+bigram)", "ref_tfidf_results.json", "dev_ref_tfidf.json", "reference only, never submitted", None),
+    ("R0   gte-modernbert-base, 8192 ctx, stripped corpus", "m3_r0_results.json", "dev_r0.json", "dense chassis, zero-shot", None),
+    ("R0b  R0 with raw (unstripped) corpus", "m3_r0_raw_results.json", None, "preprocessing ablation", "R0"),
+    ("R0c  R0 with the example section dropped from the embedded query", "m3_r0_noqex_results.json", None, "query ablation", "R0"),
+    ("R1   R0 + LoRA fine-tune", "m5_r1_results.json", "dev_r1.json", "requires GPU session", "R0"),
+    ("R2   R0/R1 + top-150 verification, rarity boost", "m7_r2_results.json", "dev_r2.json", "alpha fit on dev", "R0"),
+    ("R3   R2 + gated extension to dense rank 500 (router tau)", "m8_r3_results.json", "dev_r3.json", "tau fit on dev", "R2"),
+    ("R4a  R2 + QB-Norm demotion (no extension)", "m9_r4_results.json", "dev_r4.json", "beta fit on dev", "R2"),
+    ("R4   final: gated extension + QB-Norm", "m8_r4_final_results.json", "dev_r4_final.json", "plan R4; tau re-fit on dev with QB-Norm applied", "R3"),
 ]
 
 
@@ -67,24 +68,24 @@ def build_table() -> str:
     lines = ["# Ablations — AppsRetrieval (CoIR), every row measured", "",
              f"Generated {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())} by `vera/eval/ablation.py` from the MTEB "
              "`TaskResult` JSONs in `artifacts/` (test split, 3,765 queries, scored by `mteb.evaluate`) and the dev-split "
-             "JSONs in `docs/` (500 held-out train pairs). Δ is versus the previous *measured* rung.", "",
+             "JSONs in `docs/` (500 held-out train pairs). Δ is versus the rung named in the cell.", "",
              "| Rung | Test NDCG@10 | Δ | Test MRR@10 | Test R@10 | Test R@100 | Dev NDCG@10 | Wall time | Notes |",
              "|---|---|---|---|---|---|---|---|---|"]
-    prev: Optional[float] = None
-    for label, art, dev_name, desc in ROWS:
+    measured: Dict[str, float] = {}
+    for label, art, dev_name, desc, base in ROWS:
+        tag = label.split()[0]
         data = _load(ARTIFACTS / art)
         dev = _load(DOCS / dev_name) if dev_name else None
         if data is None:
             lines.append(f"| {label} | *not run* | | | | | {_fmt(_dev_ndcg(dev))} | | {desc} |")
             continue
         t = _test_row(data)
-        delta = "" if prev is None or label.startswith("REF") else f"{100 * (t['ndcg10'] - prev):+.2f}"
+        measured[tag] = t["ndcg10"]
+        delta = f"{100 * (t['ndcg10'] - measured[base]):+.2f} vs {base}" if base and base in measured else ""
         wall = f"{t['wall'] / 60:.0f} min" if isinstance(t["wall"], (int, float)) and t["wall"] >= 120 else (f"{t['wall']:.0f} s" if isinstance(t["wall"], (int, float)) else "—")
-        settings = ", ".join(f"{k}={v}" for k, v in t["settings"].items() if k != "model")
+        settings = ", ".join(f"{k}={v}" for k, v in t["settings"].items() if k != "model" and v is not None)
         lines.append(f"| {label} | **{_fmt(t['ndcg10'])}** | {delta} | {_fmt(t['mrr10'])} | {_fmt(t['r10'])} | {_fmt(t['r100'])} | "
                      f"{_fmt(_dev_ndcg(dev))} | {wall} | {desc}{'; ' + settings if settings else ''} |")
-        if not label.startswith("REF"):
-            prev = t["ndcg10"]
     lines += ["", "Reference points from the field (not ours): BM25 ≈ 0.95 NDCG@10 (CtrlFind), gte-modernbert-base "
                   "zero-shot 56.4 (Granite-R2 paper, 1024-token cap) / 57.5 reproduced by a PRISM competitor.", ""]
     dev_r2 = _load(DOCS / "dev_r2.json")

@@ -1,6 +1,6 @@
 # Ablations — AppsRetrieval (CoIR), every row measured
 
-Generated 2026-09-28 02:55 UTC by `vera/eval/ablation.py` from the MTEB `TaskResult` JSONs in `artifacts/` (test split, 3,765 queries, scored by `mteb.evaluate`) and the dev-split JSONs in `docs/` (500 held-out train pairs). Δ is versus the previous *measured* rung.
+Generated 2026-09-28 02:55 UTC by `vera/eval/ablation.py` from the MTEB `TaskResult` JSONs in `artifacts/` (test split, 3,765 queries, scored by `mteb.evaluate`) and the dev-split JSONs in `docs/` (500 held-out train pairs). Δ is versus the rung named in the cell.
 
 | Rung | Test NDCG@10 | Δ | Test MRR@10 | Test R@10 | Test R@100 | Dev NDCG@10 | Wall time | Notes |
 |---|---|---|---|---|---|---|---|---|
@@ -9,10 +9,10 @@ Generated 2026-09-28 02:55 UTC by `vera/eval/ablation.py` from the MTEB `TaskRes
 | R0b  R0 with raw (unstripped) corpus | *not run* | | | | | — | | preprocessing ablation |
 | R0c  R0 with the example section dropped from the embedded query | *not run* | | | | | — | | query ablation |
 | R1   R0 + LoRA fine-tune | *not run* | | | | | — | | requires GPU session |
-| R2   R0/R1 + top-150 verification, rarity boost | **87.12** | +30.30 | 85.73 | 91.34 | 93.76 | 85.03 | 57 min | alpha fit on dev; alpha=3.0, top_k=150 |
-| R3   R2 + gated extension to dense rank 500 (router tau) | **88.22** | +1.10 | 86.46 | 93.62 | 96.81 | 85.72 | 30 min | tau fit on dev; alpha=3.0, top_k=150, beta=None, tau=0.03 |
-| R4a  R2 + QB-Norm demotion (no extension) | **87.72** | -0.50 | 86.21 | 92.30 | 94.26 | 88.55 | 22 min | beta fit on dev; alpha=3.0, top_k=150, beta=0.75 |
-| R4   final: gated extension + QB-Norm | **88.74** | +1.02 | 87.03 | 93.97 | 96.79 | 89.39 | 61 min | plan R4; tau re-fit on dev with QB-Norm applied; alpha=3.0, top_k=150, beta=0.75, tau=0.02 |
+| R2   R0/R1 + top-150 verification, rarity boost | **87.12** | +30.30 vs R0 | 85.73 | 91.34 | 93.76 | 85.03 | 57 min | alpha fit on dev; alpha=3.0, top_k=150 |
+| R3   R2 + gated extension to dense rank 500 (router tau) | **88.22** | +1.10 vs R2 | 86.46 | 93.62 | 96.81 | 85.72 | 30 min | tau fit on dev; alpha=3.0, top_k=150, tau=0.03 |
+| R4a  R2 + QB-Norm demotion (no extension) | **87.72** | +0.60 vs R2 | 86.21 | 92.30 | 94.26 | 88.55 | 22 min | beta fit on dev; alpha=3.0, top_k=150, beta=0.75 |
+| R4   final: gated extension + QB-Norm | **88.74** | +0.52 vs R3 | 87.03 | 93.97 | 96.79 | 89.39 | 61 min | plan R4; tau re-fit on dev with QB-Norm applied; alpha=3.0, top_k=150, beta=0.75, tau=0.02 |
 
 Reference points from the field (not ours): BM25 ≈ 0.95 NDCG@10 (CtrlFind), gte-modernbert-base zero-shot 56.4 (Granite-R2 paper, 1024-token cap) / 57.5 reproduced by a PRISM competitor.
 
