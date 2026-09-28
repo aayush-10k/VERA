@@ -25,8 +25,9 @@ ROWS: List[Tuple[str, str, Optional[str], str]] = [
     ("R0c  R0 with the example section dropped from the embedded query", "m3_r0_noqex_results.json", None, "query ablation"),
     ("R1   R0 + LoRA fine-tune", "m5_r1_results.json", "dev_r1.json", "requires GPU session"),
     ("R2   R0/R1 + top-150 verification, rarity boost", "m7_r2_results.json", "dev_r2.json", "alpha fit on dev"),
-    ("R3   R2 + corpus-wide verification behind gate", "m8_r3_results.json", "dev_r3.json", "router tau fit on dev"),
-    ("R4   + QB-Norm demotion", "m9_r4_results.json", "dev_r4.json", "beta fit on dev"),
+    ("R3   R2 + gated extension to dense rank 500 (router tau)", "m8_r3_results.json", "dev_r3.json", "tau fit on dev"),
+    ("R4a  R2 + QB-Norm demotion (no extension)", "m9_r4_results.json", "dev_r4.json", "beta fit on dev"),
+    ("R4   final: gated extension + QB-Norm", "m8_r4_final_results.json", "dev_r4_final.json", "plan R4; tau re-fit on dev with QB-Norm applied"),
 ]
 
 
