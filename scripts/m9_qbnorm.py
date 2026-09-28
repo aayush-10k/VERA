@@ -41,7 +41,7 @@ DOCS_DIR = PROJECT_ROOT / "docs"
 R4_RESULTS_JSON = ARTIFACTS_DIR / "m9_r4_results.json"
 OFFICIAL_SUBMISSION_JSON = PROJECT_ROOT / "appsretrieval_results.json"
 K_GRID = [1, 3, 5]
-BETA_GRID = [0.0, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5]
+BETA_GRID = [0.0, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0]
 
 
 def main():

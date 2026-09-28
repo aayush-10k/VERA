@@ -103,6 +103,9 @@ def main():
     ap.add_argument("--repo-files", type=int, default=200)
     ap.add_argument("--repo-commits", type=int, default=20)
     ap.add_argument("--regressions", type=float, default=0.5, help="fraction of chains where the bug is the LAST version")
+    ap.add_argument("--w-diff", type=float, default=0.3, help="diff-line weight in the blend (0 = global similarity only)")
+    ap.add_argument("--skip-repo", action="store_true", help="skip the 200x20 repo-history rebuild benchmark (slow with the gte encoder)")
+    ap.add_argument("--tag", default="", help="suffix for the output files (ablation runs)")
     args = ap.parse_args()
     rng = random.Random(args.seed)
 
@@ -158,34 +161,38 @@ def main():
           "speedup": round(t_full / max(t_inc, 1e-9), 2)}
 
     # synthetic repo history: N files, C commits each touching 1-3 files
+    s1["repo_history"] = None
     files = {f"f{i}.py": next(c for _, c, b in h["chain"] if not b) for i, h in enumerate(histories[: args.repo_files])}
     repo_store = VersionStore()
-    repo_reports = [repo_store.ingest([SnippetRecord(p, c, "git", "c0", 0.0) for p, c in files.items()], "c0")]
+    if args.skip_repo:
+        files = {}
+    repo_reports = [repo_store.ingest([SnippetRecord(p, c, "git", "c0", 0.0) for p, c in files.items()], "c0")] if files else []
     t_inc_repo = 0.0
     t0 = time.perf_counter(); repo_store.embed_missing(encode_fn); t_inc_repo += time.perf_counter() - t0
     t_full_repo = 0.0
-    for c in range(1, args.repo_commits):
+    for c in range(1, args.repo_commits if files else 0):
         for p in rng.sample(sorted(files), k=rng.randint(1, 3)):
             files[p] = mutate_once(files[p], rng) or reformat(files[p], rng)
         repo_reports.append(repo_store.ingest([SnippetRecord(p, code, "git", f"c{c}", float(c)) for p, code in files.items()], f"c{c}"))
         t0 = time.perf_counter(); repo_store.embed_missing(encode_fn); t_inc_repo += time.perf_counter() - t0
         t0 = time.perf_counter(); encode_fn(list(files.values())); t_full_repo += time.perf_counter() - t0
-    s1["repo_history"] = {"files": len(files), "commits": args.repo_commits,
-                          "snippets_embedded_incremental": sum(r.new_snippets for r in repo_reports),
-                          "snippets_embedded_full": sum(r.records for r in repo_reports[1:]) + repo_reports[0].records,
-                          "incremental_s": round(t_inc_repo, 2), "full_reembed_s": round(t_full_repo, 2),
-                          "speedup": round((t_full_repo + 0.0) / max(t_inc_repo, 1e-9), 2)}
+    if files:
+      s1["repo_history"] = {"files": len(files), "commits": args.repo_commits,
+                            "snippets_embedded_incremental": sum(r.new_snippets for r in repo_reports),
+                            "snippets_embedded_full": sum(r.records for r in repo_reports[1:]) + repo_reports[0].records,
+                            "incremental_s": round(t_inc_repo, 2), "full_reembed_s": round(t_full_repo, 2),
+                            "speedup": round((t_full_repo + 0.0) / max(t_inc_repo, 1e-9), 2)}
 
     # ---- S2 + S3: fingerprints and ranking ------------------------------------------------
     fpi = FingerprintIndex(sandbox=sandbox, n_probes=8)
-    ranker = VersionRanker(encode_fn, sandbox=sandbox, fingerprints=fpi)
+    ranker = VersionRanker(encode_fn, sandbox=sandbox, fingerprints=fpi, w_global=1.0 - args.w_diff, w_diff=args.w_diff)
     q_embs = encode_fn([h["query"] for h in histories])
     stats = {"n": len(histories), "both_pass": 0, "regression_chains": sum(h["regression"] for h in histories),
              "refactor_certified_unchanged": 0, "bug_fingerprint_differs": 0, "bug_differs_on_both_pass": 0,
              "working_first": 0, "working_first_both_pass": 0, "no_consensus_working_first": 0, "no_consensus_working_first_both_pass": 0,
              "dense_only_working_first": 0, "dense_only_working_first_both_pass": 0,
              "recency_working_first": 0, "recency_working_first_both_pass": 0, "wall_s": 0.0}
-    plain = VersionRanker(encode_fn, sandbox=sandbox, fingerprints=fpi, use_consensus=False)
+    plain = VersionRanker(encode_fn, sandbox=sandbox, fingerprints=fpi, use_consensus=False, w_global=1.0 - args.w_diff, w_diff=args.w_diff)
     t0 = time.perf_counter()
     for i, h in enumerate(histories):
         chain = h["chain"]
@@ -223,7 +230,7 @@ def main():
     n, bp = stats["n"], max(1, stats["both_pass"])
     result = {"encoder": enc_name, "seed": args.seed, "s1": s1, "s2_s3": stats}
     DOCS.mkdir(exist_ok=True)
-    (DOCS / "stage2_benchmark.json").write_text(json.dumps(result, indent=2))
+    (DOCS / f"stage2_benchmark{args.tag}.json").write_text(json.dumps(result, indent=2))
     md = [
         "# Stage-2 synthetic version benchmark", "",
         f"Encoder for global/diff-line similarity: **{enc_name}** · {n} problems (train partition, Codeforces/AtCoder-style "
@@ -233,9 +240,9 @@ def main():
         "| Scenario | Snippet versions | Distinct snippets embedded | Incremental time | Full re-embed time | Speed-up |",
         "|---|---|---|---|---|---|",
         f"| v1→v2→v3 over {n} problems | {s1['snippet_versions_total']} | {s1['distinct_snippets_embedded']} | {s1['incremental_embed_s']} s | {s1['full_reembed_s']} s | **{s1['speedup']}×** |",
-        f"| synthetic repo: {s1['repo_history']['files']} files × {s1['repo_history']['commits']} commits (1–3 files change per commit) | "
-        f"{s1['repo_history']['snippets_embedded_full']} | {s1['repo_history']['snippets_embedded_incremental']} | "
-        f"{s1['repo_history']['incremental_s']} s | {s1['repo_history']['full_reembed_s']} s | **{s1['repo_history']['speedup']}×** |", "",
+        *([f"| synthetic repo: {s1['repo_history']['files']} files × {s1['repo_history']['commits']} commits (1–3 files change per commit) | "
+           f"{s1['repo_history']['snippets_embedded_full']} | {s1['repo_history']['snippets_embedded_incremental']} | "
+           f"{s1['repo_history']['incremental_s']} s | {s1['repo_history']['full_reembed_s']} s | **{s1['repo_history']['speedup']}×** |"] if s1.get("repo_history") else []), "",
         "v3 (reformatted) hashes to the same id as v2, so it is never re-embedded; in the repo scenario only the 1–3 touched files per commit are embedded.", "",
         "## S2 — behaviour fingerprints (8-probe battery mutated from the worked example)", "",
         "| Check | Rate |", "|---|---|",
@@ -245,7 +252,7 @@ def main():
         "A sample-only checker sees no difference on the both-pass subset; the probe battery does in the fraction above.", "",
         f"## S3 — working-version-first ({stats['regression_chains']}/{n} chains are regressions: bug introduced in the LAST version)", "",
         "| Ranker | All problems | Both-pass subset |", "|---|---|---|",
-        f"| **VERA VersionRanker** (execution separation → probe consensus → 0.7·global + 0.3·diff-line → trace tie-break) | {stats['working_first']}/{n} = **{100 * stats['working_first'] / n:.1f}%** | {stats['working_first_both_pass']}/{stats['both_pass']} = **{100 * stats['working_first_both_pass'] / bp:.1f}%** |",
+        f"| **VERA VersionRanker** (execution separation → probe consensus → {1 - args.w_diff:.1f}·global + {args.w_diff:.1f}·diff-line → trace tie-break) | {stats['working_first']}/{n} = **{100 * stats['working_first'] / n:.1f}%** | {stats['working_first_both_pass']}/{stats['both_pass']} = **{100 * stats['working_first_both_pass'] / bp:.1f}%** |",
         f"| same without probe consensus (execution separation → diff-line → trace) | {stats['no_consensus_working_first']}/{n} = {100 * stats['no_consensus_working_first'] / n:.1f}% | {stats['no_consensus_working_first_both_pass']}/{stats['both_pass']} = {100 * stats['no_consensus_working_first_both_pass'] / bp:.1f}% |",
         f"| dense similarity only | {stats['dense_only_working_first']}/{n} = {100 * stats['dense_only_working_first'] / n:.1f}% | {stats['dense_only_working_first_both_pass']}/{stats['both_pass']} = {100 * stats['dense_only_working_first_both_pass'] / bp:.1f}% |",
         f"| newest version first (recency prior) | {stats['recency_working_first']}/{n} = {100 * stats['recency_working_first'] / n:.1f}% | {stats['recency_working_first_both_pass']}/{stats['both_pass']} = {100 * stats['recency_working_first_both_pass'] / bp:.1f}% |", "",
@@ -253,7 +260,7 @@ def main():
         "so the odd one out is the bug whenever a probe exposes it; when no probe separates them (the remaining both-pass cases) the ranking falls back to text similarity and is a coin flip.", "",
         f"Wall time for fingerprinting + ranking: {stats['wall_s']} s.", "",
     ]
-    (DOCS / "stage2-benchmark.md").write_text("\n".join(md))
+    (DOCS / f"stage2-benchmark{args.tag}.md").write_text("\n".join(md))
     print("\n".join(md))
 
 

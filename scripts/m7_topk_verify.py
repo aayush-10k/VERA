@@ -167,8 +167,14 @@ def main():
     t0 = time.time()
     result = mteb.evaluate(model, task, cache=None, overwrite_strategy="always", co2_tracker=False, encode_kwargs={"batch_size": 8})
     tr = result.task_results[0]
+    wall_side = Path(str(verif_cache_path).replace(".json", ".wall.json"))
+    if model.timings.get("verify_s", 0) > 120:
+        wall_side.write_text(json.dumps({"verify_wall_s": round(model.timings["verify_s"], 1), "queries": 3765, "top_k": args.top_k,
+                                         "workers": args.workers, "note": "uncached run"}))
+    uncached = json.loads(wall_side.read_text())["verify_wall_s"] if wall_side.exists() else model.timings.get("verify_s")
     extra = {"rung": "R2", "model": args.model, "top_k": args.top_k, "alpha": selected_alpha, "timeout_s": args.timeout,
-             "wall_time_s": round(time.time() - t0, 1), "timings": model.timings, "dev": dev_report.get("dev_r2")}
+             "wall_time_s": round(time.time() - t0, 1), "verification_wall_s_uncached": uncached,
+             "timings": model.timings, "dev": dev_report.get("dev_r2")}
     save_mteb_task_result(tr, R2_RESULTS_JSON, extra=extra)
     data = json.loads(R2_RESULTS_JSON.read_text())
     ok, errors = validate_mteb_result_schema(data)

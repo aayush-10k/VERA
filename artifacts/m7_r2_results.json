@@ -215,6 +215,7 @@
       "dense_s": 2.169005870819092,
       "verify_s": 2.3962981700897217
     },
-    "dev": null
+    "dev": null,
+    "verification_wall_s_uncached": 3427.1
   }
 }

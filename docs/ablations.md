@@ -1,6 +1,6 @@
 # Ablations — AppsRetrieval (CoIR), every row measured
 
-Generated 2026-09-28 00:30 UTC by `vera/eval/ablation.py` from the MTEB `TaskResult` JSONs in `artifacts/` (test split, 3,765 queries, scored by `mteb.evaluate`) and the dev-split JSONs in `docs/` (500 held-out train pairs). Δ is versus the previous *measured* rung.
+Generated 2026-09-28 00:31 UTC by `vera/eval/ablation.py` from the MTEB `TaskResult` JSONs in `artifacts/` (test split, 3,765 queries, scored by `mteb.evaluate`) and the dev-split JSONs in `docs/` (500 held-out train pairs). Δ is versus the previous *measured* rung.
 
 | Rung | Test NDCG@10 | Δ | Test MRR@10 | Test R@10 | Test R@100 | Dev NDCG@10 | Wall time | Notes |
 |---|---|---|---|---|---|---|---|---|
@@ -9,7 +9,7 @@ Generated 2026-09-28 00:30 UTC by `vera/eval/ablation.py` from the MTEB `TaskRes
 | R0b  R0 with raw (unstripped) corpus | *not run* | | | | | — | | preprocessing ablation |
 | R0c  R0 with the example section dropped from the embedded query | *not run* | | | | | — | | query ablation |
 | R1   R0 + LoRA fine-tune | *not run* | | | | | — | | requires GPU session |
-| R2   R0/R1 + top-150 verification, rarity boost | **87.12** | +30.30 | 85.73 | 91.34 | 93.76 | 85.03 | 15 s | alpha fit on dev; alpha=3.0, top_k=150 |
+| R2   R0/R1 + top-150 verification, rarity boost | **87.12** | +30.30 | 85.73 | 91.34 | 93.76 | 85.03 | 57 min | alpha fit on dev; alpha=3.0, top_k=150 |
 | R3   R2 + corpus-wide verification behind gate | *not run* | | | | | — | | router tau fit on dev |
 | R4   + QB-Norm demotion | *not run* | | | | | 85.11 | | beta fit on dev |
 

@@ -42,7 +42,7 @@ def _load(path: Path) -> Optional[Dict[str, Any]]:
 def _test_row(data: Dict[str, Any]) -> Dict[str, Any]:
     row = data["scores"]["test"][0]
     run = data.get("vera_run", {})
-    wall = run.get("wall_time_s") or data.get("evaluation_time")
+    wall = run.get("verification_wall_s_uncached") or run.get("wall_time_s") or data.get("evaluation_time")
     return {"ndcg10": row["ndcg_at_10"], "mrr10": row["mrr_at_10"], "r10": row["recall_at_10"], "r100": row["recall_at_100"],
             "wall": wall, "settings": {k: run[k] for k in ("alpha", "top_k", "beta", "tau", "model") if k in run}}
 

@@ -121,37 +121,73 @@ class TopKVerifier:
 
     @staticmethod
     def _cache_key(query_text: str, candidate_ids: List[str]) -> str:
+        """Legacy key: (query text, exact candidate list)."""
         import hashlib
 
         h = hashlib.sha1(query_text.encode("utf-8", errors="ignore"))
         h.update(("|" + ",".join(candidate_ids)).encode("utf-8"))
         return h.hexdigest()
 
+    @staticmethod
+    def _query_key(query_text: str) -> str:
+        import hashlib
+
+        return "q:" + hashlib.sha1(query_text.encode("utf-8", errors="ignore")).hexdigest()
+
     # ------------------------------------------------------------------ #
     def verify_query(self, query_text: str, candidate_ids: List[str], corpus_dict: Dict[str, str]) -> QueryVerification:
-        """Run every candidate on the query's examples; return alpha-independent confidences."""
-        key = self._cache_key(query_text, candidate_ids) if self.cache_path else None
-        if key is not None and key in self._cache:
-            d = self._cache[key]
-            qv = QueryVerification(n_examples=d["n_examples"])
-            qv.conf, qv.passed, qv.m_first, qv.n_all_pass = d["conf"], d["passed"], d["m_first"], d["n_all_pass"]
-            qv.runtime_ms, qv.statuses = d.get("runtime_ms", 0.0), d.get("statuses", {})
-            return qv
-        examples = self.parser.parse_examples(query_text)
-        if not examples:
-            qv = QueryVerification(n_examples=0)
-        else:
+        """Run every candidate on the query's examples; return alpha-independent confidences.
+
+        Cache layout (per query): ``{"n_examples": E, "passed": {doc_id: examples_passed}}``. A later call with a
+        different candidate set (e.g. after QB-Norm reshuffles the dense top-K) only executes the candidates not
+        seen before; rarity (m) is always recomputed over the *current* candidate set.
+        """
+        qkey = self._query_key(query_text) if self.cache_path else None
+        entry = self._cache.get(qkey) if qkey else None
+        if entry is None and qkey:
+            # legacy exact-key entry -> upgrade to the per-query layout
+            legacy = self._cache.get(self._cache_key(query_text, candidate_ids))
+            if legacy is not None:
+                entry = {"n_examples": legacy["n_examples"], "passed": dict(legacy["passed"])}
+                self._cache[qkey] = entry
+                self._cache_dirty += 1
+
+        if entry is not None and entry["n_examples"] == 0:
+            return QueryVerification(n_examples=0)
+
+        examples = None
+        if entry is None:
+            examples = self.parser.parse_examples(query_text)
+            if not examples:
+                if qkey:
+                    self._cache[qkey] = {"n_examples": 0, "passed": {}}
+                    self._cache_dirty += 1
+                return QueryVerification(n_examples=0)
+            entry = {"n_examples": len(examples), "passed": {}}
+
+        missing = [d for d in candidate_ids if d not in entry["passed"]]
+        if missing:
+            if examples is None:
+                examples = self.parser.parse_examples(query_text)
             any_order = statement_allows_any_order(query_text)
-            results = self.sandbox.verify_many(
-                [(doc_id, corpus_dict.get(doc_id, "")) for doc_id in candidate_ids], examples, multiline_set=any_order
-            )
-            qv = self.summarize(results, len(examples))
-        if key is not None:
-            self._cache[key] = {"n_examples": qv.n_examples, "conf": qv.conf, "passed": qv.passed, "m_first": qv.m_first,
-                                "n_all_pass": qv.n_all_pass, "runtime_ms": qv.runtime_ms, "statuses": qv.statuses}
-            self._cache_dirty += 1
-            if self._cache_dirty >= 200:
-                self.flush_cache()
+            results = self.sandbox.verify_many([(d, corpus_dict.get(d, "")) for d in missing], examples, multiline_set=any_order)
+            for d, r in results.items():
+                entry["passed"][d] = r.passed_examples
+            if qkey:
+                self._cache[qkey] = entry
+                self._cache_dirty += 1
+                if self._cache_dirty >= 200:
+                    self.flush_cache()
+
+        n_examples = entry["n_examples"]
+        qv = QueryVerification(n_examples=n_examples)
+        qv.m_first = sum(1 for d in candidate_ids if entry["passed"].get(d, 0) > 0)
+        for d in candidate_ids:
+            p_ = entry["passed"].get(d, 0)
+            qv.passed[d] = p_
+            qv.conf[d] = compute_rarity_confidence(p_, n_examples, qv.m_first if p_ > 0 else 1)
+            if p_ == n_examples:
+                qv.n_all_pass += 1
         return qv
 
     @staticmethod
