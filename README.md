@@ -102,6 +102,28 @@ pytest tests/ -q
 
 ---
 
+### Alternative: Run via Docker (Zero Environment Setup)
+
+If you prefer containerized reproduction without local Python configuration:
+
+```bash
+# 1. Build the Docker image
+docker build -t vera:latest .
+
+# 2. Run unit test suite inside container
+docker run --rm vera:latest
+
+# 3. Reproduce submission inside container (mounts outputs to local artifacts/)
+docker run --rm -v $(pwd)/artifacts:/app/artifacts vera:latest python scripts/reproduce_submission.py
+
+# 4. Launch interactive Gradio demo via Docker
+docker run --rm -p 7860:7860 vera:latest python scripts/run_demo.py --server-name 0.0.0.0
+# Or using docker-compose:
+docker-compose up
+```
+
+---
+
 ## One-Command Submission Reproduction
 
 To reproduce the official hackathon winning submission (`appsretrieval_results.json`) from scratch:

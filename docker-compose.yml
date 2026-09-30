@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  vera:
+    build: .
+    container_name: vera_retrieval
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./docs:/app/docs
+    command: python scripts/run_demo.py --server-name 0.0.0.0
