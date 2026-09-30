@@ -63,6 +63,7 @@ all tuning on the dev split; verification is a bounded additive boost, never a f
 inference, pinned dependencies.
 
 ---
+## Demo video Link: https://drive.google.com/drive/folders/1UVF5_7YhawpmeCgTzbGQg7CB3gEQ0ZHy?usp=sharing
 
 ## Reproducible Setup & Quickstart
 
